@@ -58,7 +58,6 @@ impl App {
                             self.output_lines.clear();
                             self.output_lines.push(format!("$ {}", self.input.value()));
                             self.output_lines.push("Executing...".to_string());
-                            self.input.reset();
                         }
                     }
                     _ => {
