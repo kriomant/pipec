@@ -7,3 +7,4 @@ edition = "2024"
 ratatui = "0.28"
 crossterm = "0.28"
 tokio = { version = "1.0", features = ["full"] }
+tui-input = "0.10"

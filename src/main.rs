@@ -6,8 +6,6 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Frame, Terminal,
 };
@@ -21,6 +19,7 @@ use tokio::{
     sync::mpsc,
     time::timeout,
 };
+use tui_input::{backend::crossterm::EventHandler, Input};
 
 #[derive(Debug)]
 enum AppEvent {
@@ -30,9 +29,8 @@ enum AppEvent {
 }
 
 struct App {
-    input: String,
+    input: Input,
     output_lines: Vec<String>,
-    cursor_position: usize,
     should_quit: bool,
     current_command: String,
 }
@@ -40,57 +38,33 @@ struct App {
 impl App {
     fn new() -> App {
         App {
-            input: String::new(),
+            input: Input::default(),
             output_lines: vec!["Enter a command and press Enter to execute it.".to_string()],
-            cursor_position: 0,
             should_quit: false,
             current_command: String::new(),
         }
     }
 
-    fn handle_input(&mut self, key_code: KeyCode, modifiers: KeyModifiers) {
-        match key_code {
-            KeyCode::Char('q') if modifiers.contains(KeyModifiers::CONTROL) => {
-                self.should_quit = true;
-            }
-            KeyCode::Enter => {
-                if !self.input.trim().is_empty() {
-                    self.current_command = self.input.clone();
-                    self.output_lines.clear();
-                    self.output_lines.push(format!("$ {}", self.input));
-                    self.output_lines.push("Executing...".to_string());
+    fn handle_input(&mut self, event: Event) {
+        match event {
+            Event::Key(key) => {
+                match key.code {
+                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.should_quit = true;
+                    }
+                    KeyCode::Enter => {
+                        if !self.input.value().trim().is_empty() {
+                            self.current_command = self.input.value().to_string();
+                            self.output_lines.clear();
+                            self.output_lines.push(format!("$ {}", self.input.value()));
+                            self.output_lines.push("Executing...".to_string());
+                            self.input.reset();
+                        }
+                    }
+                    _ => {
+                        self.input.handle_event(&event);
+                    }
                 }
-            }
-            KeyCode::Char(c) => {
-                self.input.insert(self.cursor_position, c);
-                self.cursor_position += 1;
-            }
-            KeyCode::Backspace => {
-                if self.cursor_position > 0 {
-                    self.input.remove(self.cursor_position - 1);
-                    self.cursor_position -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                if self.cursor_position < self.input.len() {
-                    self.input.remove(self.cursor_position);
-                }
-            }
-            KeyCode::Left => {
-                if self.cursor_position > 0 {
-                    self.cursor_position -= 1;
-                }
-            }
-            KeyCode::Right => {
-                if self.cursor_position < self.input.len() {
-                    self.cursor_position += 1;
-                }
-            }
-            KeyCode::Home => {
-                self.cursor_position = 0;
-            }
-            KeyCode::End => {
-                self.cursor_position = self.input.len();
             }
             _ => {}
         }
@@ -122,26 +96,16 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
         .split(f.area());
 
-    // Input area
-    let input_text = if app.cursor_position < app.input.len() {
-        vec![
-            Span::raw(&app.input[..app.cursor_position]),
-            Span::styled(
-                &app.input[app.cursor_position..app.cursor_position + 1],
-                Style::default().bg(Color::White).fg(Color::Black),
-            ),
-            Span::raw(&app.input[app.cursor_position + 1..]),
-        ]
-    } else {
-        vec![
-            Span::raw(&app.input),
-            Span::styled(" ", Style::default().bg(Color::White)),
-        ]
-    };
-
-    let input = Paragraph::new(Line::from(input_text))
+    // Input area - use tui-input's built-in rendering
+    let input = Paragraph::new(app.input.value())
         .block(Block::default().borders(Borders::ALL).title("Command (Ctrl-Q to quit)"));
     f.render_widget(input, chunks[0]);
+    
+    // Set cursor position
+    f.set_cursor_position((
+        chunks[0].x + app.input.visual_cursor() as u16 + 1,
+        chunks[0].y + 1,
+    ));
 
     // Output area
     let output_items: Vec<ListItem> = app
@@ -235,8 +199,8 @@ async fn run_app(
         // Handle events
         if let Ok(event) = rx.try_recv() {
             match event {
-                AppEvent::Input(Event::Key(key)) => {
-                    app.handle_input(key.code, key.modifiers);
+                AppEvent::Input(input_event) => {
+                    app.handle_input(input_event);
                 }
                 AppEvent::CommandOutput(output) => {
                     app.handle_command_output(output);
@@ -244,7 +208,6 @@ async fn run_app(
                 AppEvent::CommandError(error) => {
                     app.handle_command_error(error);
                 }
-                _ => {}
             }
         }
 
