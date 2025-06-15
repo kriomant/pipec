@@ -1,8 +1,9 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use futures::StreamExt as _;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
@@ -162,13 +163,12 @@ async fn run_app(
     let (tx, mut rx) = mpsc::unbounded_channel();
     
     // Spawn input handler
+    let mut term_event_reader = crossterm::event::EventStream::new();
     let input_tx = tx.clone();
     tokio::spawn(async move {
-        loop {
-            if let Ok(event) = event::read() {
-                if input_tx.send(AppEvent::Input(event)).is_err() {
-                    break;
-                }
+        while let Some(Ok(event)) = term_event_reader.next().await {
+            if input_tx.send(AppEvent::Input(event)).is_err() {
+                break;
             }
         }
     });
