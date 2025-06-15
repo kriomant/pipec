@@ -6,7 +6,9 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    style::{Color, Style},
+    text::{Span, Line},
+    widgets::{Block, List, ListItem, Paragraph},
     Frame, Terminal,
 };
 use std::{
@@ -95,15 +97,19 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
         .split(f.area());
 
-    // Input area - use tui-input's built-in rendering
-    let input = Paragraph::new(app.input.value())
-        .block(Block::default().borders(Borders::ALL).title("Command (Ctrl-Q to quit)"));
+    // Input area with green prompt sign
+    let input_line = Line::from(vec![
+        Span::styled("❯ ", Style::default().fg(Color::Green)),
+        Span::raw(app.input.value()),
+    ]);
+    let input = Paragraph::new(input_line)
+        .block(Block::default());
     f.render_widget(input, chunks[0]);
     
-    // Set cursor position
+    // Set cursor position (accounting for the green prompt sign)
     f.set_cursor_position((
-        chunks[0].x + app.input.visual_cursor() as u16 + 1,
-        chunks[0].y + 1,
+        chunks[0].x + app.input.visual_cursor() as u16 + 2, // +2 for "❯ " prefix
+        chunks[0].y,
     ));
 
     // Output area
@@ -114,7 +120,7 @@ fn ui(f: &mut Frame, app: &App) {
         .collect();
 
     let output = List::new(output_items)
-        .block(Block::default().borders(Borders::ALL).title("Output"));
+        .block(Block::default());
     f.render_widget(output, chunks[1]);
 }
 
