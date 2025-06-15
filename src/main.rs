@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Style},
     text::{Span, Line},
-    widgets::{Block, List, ListItem, Paragraph},
+    widgets::{List, ListItem, Paragraph},
     Frame, Terminal,
 };
 use std::{
@@ -58,7 +58,6 @@ impl App {
                         if !self.input.value().trim().is_empty() {
                             self.current_command = self.input.value().to_string();
                             self.output_lines.clear();
-                            self.output_lines.push(format!("$ {}", self.input.value()));
                             self.output_lines.push("Executing...".to_string());
                         }
                     }
@@ -73,7 +72,6 @@ impl App {
 
     fn handle_command_output(&mut self, output: String) {
         self.output_lines.clear();
-        self.output_lines.push(format!("$ {}", self.current_command));
         
         if output.trim().is_empty() {
             self.output_lines.push("(no output)".to_string());
@@ -86,7 +84,6 @@ impl App {
 
     fn handle_command_error(&mut self, error: String) {
         self.output_lines.clear();
-        self.output_lines.push(format!("$ {}", self.current_command));
         self.output_lines.push(format!("Error: {}", error));
     }
 }
@@ -94,7 +91,7 @@ impl App {
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0)].as_ref())
+        .constraints([Constraint::Length(1), Constraint::Min(0)].as_ref())
         .split(f.area());
 
     // Input area with green prompt sign
@@ -102,8 +99,7 @@ fn ui(f: &mut Frame, app: &App) {
         Span::styled("❯ ", Style::default().fg(Color::Green)),
         Span::raw(app.input.value()),
     ]);
-    let input = Paragraph::new(input_line)
-        .block(Block::default());
+    let input = Paragraph::new(input_line);
     f.render_widget(input, chunks[0]);
     
     // Set cursor position (accounting for the green prompt sign)
@@ -119,8 +115,7 @@ fn ui(f: &mut Frame, app: &App) {
         .map(|line| ListItem::new(line.as_str()))
         .collect();
 
-    let output = List::new(output_items)
-        .block(Block::default());
+    let output = List::new(output_items);
     f.render_widget(output, chunks[1]);
 }
 
