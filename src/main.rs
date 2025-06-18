@@ -1,3 +1,5 @@
+#![feature(result_option_map_or_default)]
+
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -26,6 +28,16 @@ struct Process {
     stderr: Option<ChildStderr>,
 }
 
+enum ExecutionState {
+    Running(Process),
+    Finished(ExitStatus),
+}
+
+struct Execution {
+    state: ExecutionState,
+    output: String,
+}
+
 struct App {
     input: Input,
     should_quit: bool,
@@ -36,9 +48,7 @@ struct App {
     // as pending awaiting until old child exits.
     pending_command: Option<String>,
 
-    current_process: Option<Process>,
-    command_output: String,
-    exit_status: Option<ExitStatus>,
+    execution: Option<Execution>,
 }
 
 impl App {
@@ -48,9 +58,7 @@ impl App {
             should_quit: false,
             show_help: true,
             pending_command: None,
-            current_process: None,
-            command_output: String::new(),
-            exit_status: None,
+            execution: None,
         }
     }
 
@@ -64,16 +72,15 @@ impl App {
                     KeyCode::Enter => {
                         if !self.input.value().trim().is_empty() {
                             self.show_help = false;
-                            if let Some(process) = &mut self.current_process {
+                            if let Some(execution) = &mut self.execution &&
+                               let ExecutionState::Running(process) = &mut execution.state {
                                 // We can't immediately start new program instance because old one
                                 // is still running. Remember current command and terminate old
                                 // one.
                                 self.pending_command = Some(self.input.value().to_string());
                                 process.child.start_kill().unwrap();
                             } else {
-                                self.command_output.clear();
-                                self.exit_status = None;
-                                self.current_process = Some(start_command(self.input.value()).unwrap());
+                                self.execution = Some(start_command(self.input.value()).unwrap());
                             }
                         }
                     }
@@ -86,22 +93,34 @@ impl App {
         }
     }
 
-    fn handle_process_terminated(&mut self, status: ExitStatus) {
-        self.exit_status = Some(status);
-        
-        match status.code() {
-            Some(code) => writeln!(self.command_output, "\nProcess exited with code {}", code).unwrap(),
-            None => writeln!(self.command_output, "\nProcess exited with code {}", status.signal().unwrap()).unwrap(),
+    fn handle_process_terminated(&mut self, status: ExitStatus) -> std::io::Result<()> {
+        let execution = self.execution.as_mut().unwrap();
+        execution.state = ExecutionState::Finished(status);
+
+        // Even though process is terminated, there may be some data in stdout/stderr
+        // buffers, so don't close them immediately.
+        // However, if there is pending command, then we are not interested in complete
+        // result of current one anyway, so just close buffers and reset output.
+        if let Some(command) = self.pending_command.take() {
+            self.execution = Some(start_command(&command)?);
+        } else {
+            match status.code() {
+                Some(code) => writeln!(execution.output, "\nProcess exited with code {}", code).unwrap(),
+                None => writeln!(execution.output, "\nProcess exited with code {}", status.signal().unwrap()).unwrap(),
+            }
         }
+        Ok(())
     }
 
     fn handle_stdout(&mut self, buf: &[u8]) {
         let text = std::str::from_utf8(buf).unwrap();
-        self.command_output.push_str(text);
+        let execution = self.execution.as_mut().unwrap();
+        execution.output.push_str(text);
     }
     fn handle_stderr(&mut self, buf: &[u8]) {
         let text = std::str::from_utf8(buf).unwrap();
-        self.command_output.push_str(text);
+        let execution = self.execution.as_mut().unwrap();
+        execution.output.push_str(text);
     }
 }
 
@@ -112,14 +131,16 @@ fn ui(f: &mut Frame, app: &App) {
         .split(f.area());
 
     // Status indicator
-    let status_span = match &app.exit_status {
-        None if app.current_process.is_none() => Span::raw(" "),  // Command is running
-        None => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
-        Some(status) => {
-            if status.success() {
-                Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
-            } else {
-                Span::styled("✖︎", Style::default().fg(Color::Red))  // Failed
+    let status_span = match &app.execution {
+        None => Span::raw(" "),  // Command is running
+        Some(ex) => match ex.state {
+            ExecutionState::Running(_) => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
+            ExecutionState::Finished(status) => {
+                if status.success() {
+                    Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
+                } else {
+                    Span::styled("✖︎", Style::default().fg(Color::Red))  // Failed
+                }
             }
         }
     };
@@ -145,7 +166,7 @@ fn ui(f: &mut Frame, app: &App) {
 
     // Output area
     let output_area = chunks[1];
-    let output = Paragraph::new(app.command_output.as_str());
+    let output = Paragraph::new(app.execution.as_ref().map_or_default(|e| e.output.as_str()));
     f.render_widget(output, output_area);
 
     if app.show_help {
@@ -196,7 +217,7 @@ fn ui(f: &mut Frame, app: &App) {
     }
 }
 
-fn start_command(command: &str) -> std::io::Result<Process> {
+fn start_command(command: &str) -> std::io::Result<Execution> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", &command]);
@@ -216,7 +237,11 @@ fn start_command(command: &str) -> std::io::Result<Process> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     assert!(stdout.is_some() && stderr.is_some());
-    Ok(Process { child, stdout, stderr })
+
+    Ok(Execution {
+        state: ExecutionState::Running(Process { child, stdout, stderr }),
+        output: String::new(),
+    })
 }
 
 async fn run_app(
@@ -231,11 +256,12 @@ async fn run_app(
     loop {
         terminal.draw(|f| ui(f, &app))?;
 
-        let (child, stdout, stderr) = if let Some(p) = app.current_process.as_mut() {
-            (Some(&mut p.child), p.stdout.as_mut(), p.stderr.as_mut())
-        } else {
-            (None, None, None)
-        };
+        let (child, stdout, stderr) =
+            if let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut app.execution {
+                (Some(&mut p.child), p.stdout.as_mut(), p.stderr.as_mut())
+            } else {
+                (None, None, None)
+            };
 
         select! {
             result = term_event_reader.next() => {
@@ -245,25 +271,17 @@ async fn run_app(
                 }
             }
             Some(status) = OptionFuture::from(child.map(|c| c.wait())) => {
-                app.handle_process_terminated(status?);
-                app.current_process = None;
-
-                // Even though process is terminated, there may be some data in stdout/stderr
-                // buffers, so don't close them immediately.
-                // However, if there is pending command, then we are not interested in complete
-                // result of current one anyway, so just close buffers and reset output.
-                if let Some(command) = app.pending_command.take() {
-                    app.command_output.clear();
-                    app.exit_status = None;
-                    app.current_process = Some(start_command(&command)?);
-                }
+                app.handle_process_terminated(status?)?;
             }
             Some(bytes_read) = OptionFuture::from(stdout.map(|s| s.read(&mut stdout_buf))) => {
                 let bytes_read = bytes_read?;
                 if bytes_read != 0 {
                     app.handle_stdout(&stdout_buf[..bytes_read]);
                 } else {
-                    app.current_process.as_mut().unwrap().stdout = None;
+                    let Some(Execution { state: ExecutionState::Running(p), .. }) = app.execution.as_mut() else {
+                        panic!("unexpected state");
+                    };
+                    p.stdout = None;
                 }
             }
             Some(bytes_read) = OptionFuture::from(stderr.map(|s| s.read(&mut stderr_buf))) => {
@@ -271,7 +289,10 @@ async fn run_app(
                 if bytes_read != 0 {
                     app.handle_stderr(&stderr_buf[..bytes_read]);
                 } else {
-                    app.current_process.as_mut().unwrap().stderr = None;
+                    let Some(Execution { state: ExecutionState::Running(p), .. }) = app.execution.as_mut() else {
+                        panic!("unexpected state");
+                    };
+                    p.stderr = None;
                 }
             }
         }
