@@ -28,7 +28,6 @@ struct Process {
 
 struct App {
     input: Input,
-    command_output: String,
     should_quit: bool,
     show_help: bool,
 
@@ -38,17 +37,20 @@ struct App {
     pending_command: Option<String>,
 
     current_process: Option<Process>,
+    command_output: String,
+    exit_status: Option<ExitStatus>,
 }
 
 impl App {
     fn new() -> App {
         App {
             input: Input::default(),
-            command_output: String::new(),
             should_quit: false,
             show_help: true,
             pending_command: None,
             current_process: None,
+            command_output: String::new(),
+            exit_status: None,
         }
     }
 
@@ -70,6 +72,7 @@ impl App {
                                 process.child.start_kill().unwrap();
                             } else {
                                 self.command_output.clear();
+                                self.exit_status = None;
                                 self.current_process = Some(start_command(self.input.value()).unwrap());
                             }
                         }
@@ -84,6 +87,8 @@ impl App {
     }
 
     fn handle_process_terminated(&mut self, status: ExitStatus) {
+        self.exit_status = Some(status);
+        
         match status.code() {
             Some(code) => writeln!(self.command_output, "\nProcess exited with code {}", code).unwrap(),
             None => writeln!(self.command_output, "\nProcess exited with code {}", status.signal().unwrap()).unwrap(),
@@ -106,13 +111,31 @@ fn ui(f: &mut Frame, app: &App) {
         .constraints([Constraint::Length(1), Constraint::Min(0)].as_ref())
         .split(f.area());
 
-    // Input area with green prompt sign
+    // Status indicator
+    let status_span = match &app.exit_status {
+        None if app.current_process.is_none() => Span::raw(" "),  // Command is running
+        None => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
+        Some(status) => {
+            if status.success() {
+                Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
+            } else {
+                Span::styled("✖︎", Style::default().fg(Color::Red))  // Failed
+            }
+        }
+    };
+
+    // Input area with green prompt sign and status indicator
     let input_line = Line::from(vec![
         Span::styled("❯ ", Style::default().fg(Color::Green)),
         Span::raw(app.input.value()),
     ]);
     let input = Paragraph::new(input_line);
     f.render_widget(input, chunks[0]);
+
+    // Status indicator aligned to the right
+    let status = Paragraph::new(Line::from(vec![status_span]))
+        .alignment(Alignment::Right);
+    f.render_widget(status, chunks[0]);
 
     // Set cursor position (accounting for the green prompt sign)
     f.set_cursor_position((
@@ -231,6 +254,7 @@ async fn run_app(
                 // result of current one anyway, so just close buffers and reset output.
                 if let Some(command) = app.pending_command.take() {
                     app.command_output.clear();
+                    app.exit_status = None;
                     app.current_process = Some(start_command(&command)?);
                 }
             }
