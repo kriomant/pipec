@@ -6,9 +6,9 @@ use crossterm::{
 use futures::{future::OptionFuture, StreamExt as _};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Alignment, Constraint, Direction, Flex, Layout},
     style::{Color, Style},
-    text::{Span, Line},
+    text::{Line, Span, Text},
     widgets::Paragraph,
     Frame, Terminal,
 };
@@ -30,6 +30,7 @@ struct App {
     input: Input,
     command_output: String,
     should_quit: bool,
+    show_help: bool,
 
     // Content of input at the moment Enter was pressed.
     // If old child is still alive at this point, command in saved
@@ -45,6 +46,7 @@ impl App {
             input: Input::default(),
             command_output: String::new(),
             should_quit: false,
+            show_help: true,
             pending_command: None,
             current_process: None,
         }
@@ -59,6 +61,7 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if !self.input.value().trim().is_empty() {
+                            self.show_help = false;
                             if let Some(process) = &mut self.current_process {
                                 // We can't immediately start new program instance because old one
                                 // is still running. Remember current command and terminate old
@@ -118,8 +121,56 @@ fn ui(f: &mut Frame, app: &App) {
     ));
 
     // Output area
+    let output_area = chunks[1];
     let output = Paragraph::new(app.command_output.as_str());
-    f.render_widget(output, chunks[1]);
+    f.render_widget(output, output_area);
+
+    if app.show_help {
+        let key_style = Style::default().fg(Color::Yellow);
+
+        let introduction_text = Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled("Welcome to Plumber!", Style::default().fg(Color::Cyan))),
+            Line::from(""),
+            Line::from(vec![Span::raw("Type a command and press "), Span::styled("Enter", key_style), Span::raw(" to get started.")]),
+            Line::from(""),
+        ]);
+        let keys_help = Text::from(vec![
+            Line::from(vec![
+                Span::styled("Enter  ", key_style),
+                Span::raw("Execute command"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+Q ", key_style),
+                Span::raw("Exit program"),
+            ]),
+        ]);
+
+        let [introduction_area, keys_area] =
+            Layout::vertical([
+                Constraint::Length(introduction_text.lines.len() as u16),
+                Constraint::Length(keys_help.lines.len() as u16),
+            ])
+            .flex(Flex::Center)
+            .areas(output_area);
+        let [introduction_area] =
+            Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
+            .flex(Flex::Center)
+            .areas(introduction_area);
+        let [keys_area] =
+            Layout::horizontal([Constraint::Length(keys_help.width() as u16)])
+            .flex(Flex::Center)
+            .areas(keys_area);
+
+        f.render_widget(
+            Paragraph::new(introduction_text) .alignment(Alignment::Center),
+            introduction_area
+        );
+        f.render_widget(
+            Paragraph::new(keys_help),
+            keys_area
+        );
+    }
 }
 
 fn start_command(command: &str) -> std::io::Result<Process> {
@@ -179,6 +230,7 @@ async fn run_app(
                 // However, if there is pending command, then we are not interested in complete
                 // result of current one anyway, so just close buffers and reset output.
                 if let Some(command) = app.pending_command.take() {
+                    app.command_output.clear();
                     app.current_process = Some(start_command(&command)?);
                 }
             }
