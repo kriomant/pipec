@@ -17,7 +17,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    fs::File, io::{self}, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -70,6 +70,16 @@ struct Stage {
     pending_command: Option<String>,
 }
 
+impl Stage {
+    fn new() -> Self {
+        Self {
+            command: String::new(),
+            execution: None,
+            pending_command: None,
+        }
+    }
+}
+
 struct App {
     input: Input,
     should_quit: bool,
@@ -106,25 +116,48 @@ impl App {
                     KeyEvent { code: KeyCode::Char('q'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.should_quit = true;
                     }
+                    KeyEvent { code: KeyCode::Char('n'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        self.pipeline.push(Stage::new());
+                        self.focused_stage = self.pipeline.len() - 1;
+                        self.input.reset();
+                    }
+                    KeyEvent { code: KeyCode::Up, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
+                        // Move focus to previous stage.
+                        if self.focused_stage != 0 {
+                            self.focused_stage -= 1;
+                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
+                        }
+                    }
+                    KeyEvent { code: KeyCode::Down, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
+                        // Move focus to next stage.
+                        if self.focused_stage < self.pipeline.len() - 1 {
+                            self.focused_stage += 1;
+                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
+                        }
+                    }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         if !self.input.value().trim().is_empty() {
                             self.show_help = false;
-                            let stage = &mut self.pipeline[0];
-                            if let Some(execution) = &mut stage.execution &&
-                               let ExecutionState::Running(process) = &mut execution.state {
-                                // We can't immediately start new program instance because old one
-                                // is still running. Remember current command and terminate old
-                                // one.
-                                stage.pending_command = Some(self.input.value().to_string());
-                                process.child.start_kill().unwrap();
-                            } else {
-                                stage.execution = Some(start_command(self.input.value(), self.focused_stage != 0).unwrap());
+
+                            // (Re)start all stages.
+                            for (i, stage) in self.pipeline.iter_mut().enumerate() {
+                                if let Some(execution) = &mut stage.execution &&
+                                   let ExecutionState::Running(process) = &mut execution.state
+                                {
+                                    // We can't immediately start new program instance because old one
+                                    // is still running. Remember current command and terminate old
+                                    // one.
+                                    stage.pending_command = Some(stage.command.clone());
+                                    process.child.start_kill().unwrap();
+                                } else {
+                                    stage.execution = Some(start_command(&stage.command, i != 0).unwrap());
+                                }
                             }
                         }
                     }
                     _ => {
                         self.input.handle_event(&event);
-                        self.pipeline[0].command = self.input.value().to_string();
+                        self.pipeline[self.focused_stage].command = self.input.value().to_string();
                     }
                 }
             }
@@ -133,11 +166,11 @@ impl App {
     }
 
     fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
-        log::info!("stage {} teminated: {:?}", i, status);
+        log::info!("stage {}: teminated: {:?}", i, status);
         let stage = &mut self.pipeline[i];
 
         // Stage must be active.
-        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+        let Some(Execution { state: ExecutionState::Running(p), .. }) = stage.execution.as_mut() else {
             panic!("invalid state");
         };
 
@@ -149,11 +182,6 @@ impl App {
             return Ok(());
         }
 
-        match status.code() {
-            Some(code) => output.push_str(&format!("\nProcess exited with code {}", code)),
-            None => output.push_str(&format!("\nProcess exited with code {}", status.signal().unwrap())),
-        }
-
         // Otherwise, even though process is terminated, there may be some data left
         // in stdout/stderr buffers, so don't switch execution to 'finished' state
         // until they are read out and closed.
@@ -163,63 +191,110 @@ impl App {
             return Ok(());
         }
 
+        log::info!("stage {}: finished", i);
         stage.execution.as_mut().unwrap().state = ExecutionState::Finished(status);
 
         Ok(())
     }
 
     fn handle_stdin(&mut self, i: usize, bytes_written: usize) {
+        log::info!("stage {}: written {} bytes to stdin", i, bytes_written);
+        let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
+            panic!("unexpected state");
+        };
+
         if bytes_written == 0 {
-            let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
-                panic!("unexpected state");
-            };
             p.stdin = None;
             return;
         }
 
-        let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i-1].execution else {
-            panic!("unexpected state");
-        };
         p.bytes_written_to_stdin += bytes_written;
+        log::debug!("stage {}: {} bytes written to stdin", i, p.bytes_written_to_stdin);
     }
 
     fn handle_stdout(&mut self, i: usize, buf: &[u8]) {
+        log::info!("stage {}: read {} bytes from stdout", i, buf.len());
         let stage = &mut self.pipeline[i];
 
-        // Stage must be active.
-        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
-            panic!("invalid state");
+        let exit_status = {
+            // Stage must be active.
+            let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+                panic!("invalid state");
+            };
+
+            if !buf.is_empty() {
+                output.push_slice(buf);
+                return;
+            }
+
+            // Stdout is closed.
+            p.stdout = None;
+            let finished = p.finished();
+
+            if finished {
+                log::info!("stage {}: finished", i);
+                p.status
+            } else {
+                None
+            }
         };
 
-        if !buf.is_empty() {
-            output.push_slice(buf);
-            return;
+        if let Some(exit_status) = exit_status {
+            let new_state = ExecutionState::Finished(exit_status);
+            stage.execution.as_mut().unwrap().state = new_state;
         }
 
-        // Stdout is closed.
-        p.stdout = None;
-        if p.finished() {
-            stage.execution.as_mut().unwrap().state = ExecutionState::Finished(p.status.unwrap());
+        // Close stdin of next stage, if all data are already written.
+        let output_len = stage.execution.as_mut().unwrap().output.len();
+        if i < self.pipeline.len() - 1 {
+            if let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut() {
+                if p.bytes_written_to_stdin == output_len {
+                    p.stdin = None;
+                }
+            }
         }
     }
 
     fn handle_stderr(&mut self, i: usize, buf: &[u8]) {
+        log::info!("stage {}: read {} bytes from stderr", i, buf.len());
         let stage = &mut self.pipeline[i];
 
-        // Stage must be active.
-        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
-            panic!("invalid state");
+        let exit_status = {
+            // Stage must be active.
+            let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+                panic!("invalid state");
+            };
+
+            if !buf.is_empty() {
+                output.push_slice(buf);
+                return;
+            }
+
+            // Stderr is closed.
+            p.stderr = None;
+            let finished = p.finished();
+
+            if finished {
+                log::info!("stage {}: finished", i);
+                p.status
+            } else {
+                None
+            }
         };
 
-        if !buf.is_empty() {
-            output.push_slice(buf);
-            return;
+        if let Some(exit_status) = exit_status {
+            let new_state = ExecutionState::Finished(exit_status);
+            stage.execution.as_mut().unwrap().state = new_state;
         }
 
-        // Stdout is closed.
-        p.stderr = None;
-        if p.finished() {
-            stage.execution.as_mut().unwrap().state = ExecutionState::Finished(p.status.unwrap());
+        // Close stdin of next stage, if all data are already written.
+        let output_len = stage.execution.as_mut().unwrap().output.len();
+        if i < self.pipeline.len() - 1 {
+            if let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut() {
+                if p.bytes_written_to_stdin == output_len {
+                    p.stdin = None;
+                }
+            }
         }
     }
 }
@@ -237,7 +312,7 @@ fn ui(f: &mut Frame, app: &App) {
     let (output_area, stage_areas) = stage_areas.split_last().unwrap();
 
     for (i, (stage, area)) in app.pipeline.iter().zip(stage_areas.iter()).enumerate() {
-        let command_pos = render_stage(f, stage, *area);
+        let command_pos = render_stage(f, stage, *area, i == app.focused_stage);
 
         if app.focused_stage == i {
             f.set_cursor_position((
@@ -270,6 +345,10 @@ fn ui(f: &mut Frame, app: &App) {
             Line::from(vec![
                 Span::styled("Ctrl+Q ", key_style),
                 Span::raw("Exit program"),
+            ]),
+            Line::from(vec![
+                Span::styled("Alt-N  ", key_style),
+                Span::raw("Add new stage"),
             ]),
             Line::from(vec![
                 Span::styled("↑/↓    ", key_style),
@@ -306,7 +385,7 @@ fn ui(f: &mut Frame, app: &App) {
 
 /// Renders stage into given area.
 /// Returns position of command widget.
-fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect) -> Position {
+fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> Position {
     let [marker_area, command_area, status_area] = Layout
         ::horizontal([
             Constraint::Min(1),
@@ -316,8 +395,9 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect) -> Position {
         .spacing(1)
         .areas(area);
 
-    // Input area with green prompt sign
-    frame.render_widget(Span::styled("❯", Style::default().fg(Color::Green)), marker_area);
+    // Prompt sign
+    let marker_color = if focused { Color::Green } else { Color::Gray };
+    frame.render_widget(Span::styled("❯", Style::default().fg(marker_color)), marker_area);
 
     // Command
     frame.render_widget(Span::raw(&stage.command), command_area);
@@ -415,11 +495,15 @@ async fn run_app(
 
                 if let (Some(stdin), Some(prev_stdout)) = (&mut p.stdin, prev_stdout) {
                     let bytes_written_to_stdin = p.bytes_written_to_stdin;
-                    stdin_futures.push(async move {
-                        let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
-                        let res = stdin.write(buf).await;
-                        (i, res)
-                    });
+                    if bytes_written_to_stdin < prev_stdout.len() {
+                        log::debug!("stage {}: {} of {} previous stage output bytes are written to stdin", i, p.bytes_written_to_stdin, prev_stdout.len());
+                        stdin_futures.push(async move {
+                            log::debug!("stage {}: schedule writing {} bytes", i, &prev_stdout.as_bytes()[bytes_written_to_stdin..].len());
+                            let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
+                            let res = stdin.write(buf).await;
+                            (i, res)
+                        });
+                    }
                 }
                 if let Some(stdout) = &mut p.stdout {
                     stdout_futures.push(async move {
