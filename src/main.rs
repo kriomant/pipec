@@ -2,7 +2,7 @@
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -90,11 +90,11 @@ impl App {
     fn handle_input(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
-                match key.code {
-                    KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                match key {
+                    KeyEvent { code: KeyCode::Char('q'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.should_quit = true;
                     }
-                    KeyCode::Enter => {
+                    KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         if !self.input.value().trim().is_empty() {
                             self.show_help = false;
                             let stage = &mut self.pipeline[0];
@@ -230,6 +230,10 @@ fn ui(f: &mut Frame, app: &App) {
             Line::from(vec![
                 Span::styled("Ctrl+Q ", key_style),
                 Span::raw("Exit program"),
+            ]),
+            Line::from(vec![
+                Span::styled("↑/↓    ", key_style),
+                Span::raw("Go to previous/next stage"),
             ]),
         ]);
 
