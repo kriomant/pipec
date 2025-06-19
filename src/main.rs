@@ -1,6 +1,7 @@
 #![feature(result_option_map_or_default)]
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
+use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
@@ -23,6 +24,8 @@ use tokio::{
 };
 use tui_input::{backend::crossterm::EventHandler, Input};
 
+use crate::options::Options;
+
 struct Process {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -32,6 +35,8 @@ struct Process {
     // Number of bytes written to stdin from previous stage's output.
     bytes_written_to_stdin: usize,
 }
+
+mod options;
 
 enum ExecutionState {
     Running(Process),
@@ -71,14 +76,14 @@ struct App {
 }
 
 impl App {
-    fn new() -> App {
+    fn new(options: Options) -> App {
         App {
             input: Input::default(),
             should_quit: false,
             show_help: true,
             pipeline: vec![
                 Stage {
-                    command: String::new(),
+                    command: options.command.unwrap_or_default(),
                     execution: None,
                     pending_command: None,
                 },
@@ -430,6 +435,8 @@ async fn run_app(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let options = Options::parse();
+
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -452,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let app = App::new();
+    let app = App::new(options);
     let res = run_app(&mut terminal, app).await;
 
     // Restore terminal
