@@ -17,7 +17,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -126,6 +126,7 @@ impl App {
     }
 
     fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
+        log::info!("stage {} teminated: {:?}", i, status);
         let stage = &mut self.pipeline[i];
         let execution = stage.execution.as_mut().unwrap();
         execution.state = ExecutionState::Finished(status);
@@ -319,6 +320,7 @@ fn start_command(command: &str, stdin: bool) -> std::io::Result<Execution> {
         cmd
     };
 
+    log::info!("start command: {:?}", cmd);
     let mut child = cmd
         .kill_on_drop(true)
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
@@ -436,6 +438,14 @@ async fn run_app(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options::parse();
+
+    if let Some(logging) = &options.logging {
+        let log_writer = File::create(options.log_file.as_ref().unwrap())?;
+        env_logger::Builder::new()
+            .parse_filters(&logging)
+            .target(env_logger::Target::Pipe(Box::new(log_writer)))
+            .try_init()?;
+    }
 
     // Setup terminal
     enable_raw_mode()?;
