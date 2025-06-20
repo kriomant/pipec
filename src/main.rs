@@ -28,12 +28,19 @@ use crate::options::Options;
 
 struct Process {
     child: Child,
+
+    status: Option<ExitStatus>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
 
     // Number of bytes written to stdin from previous stage's output.
     bytes_written_to_stdin: usize,
+}
+impl Process {
+    fn finished(&self) -> bool {
+        self.status.is_some() && self.stdout.is_none() && self.stderr.is_none()
+    }
 }
 
 mod options;
@@ -128,21 +135,36 @@ impl App {
     fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
         log::info!("stage {} teminated: {:?}", i, status);
         let stage = &mut self.pipeline[i];
-        let execution = stage.execution.as_mut().unwrap();
-        execution.state = ExecutionState::Finished(status);
 
-        // Even though process is terminated, there may be some data in stdout/stderr
-        // buffers, so don't close them immediately.
-        // However, if there is pending command, then we are not interested in complete
-        // result of current one anyway, so just close buffers and reset output.
+        // Stage must be active.
+        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+            panic!("invalid state");
+        };
+
+        // If there is pending command, then we are not interested in complete
+        // result of current execution, so just close buffers and start new
+        // execution.
         if let Some(command) = stage.pending_command.take() {
             stage.execution = Some(start_command(&command, i != 0)?);
-        } else {
-            match status.code() {
-                Some(code) => execution.output.push_str(&format!("\nProcess exited with code {}", code)),
-                None => execution.output.push_str(&format!("\nProcess exited with code {}", status.signal().unwrap())),
-            }
+            return Ok(());
         }
+
+        match status.code() {
+            Some(code) => output.push_str(&format!("\nProcess exited with code {}", code)),
+            None => output.push_str(&format!("\nProcess exited with code {}", status.signal().unwrap())),
+        }
+
+        // Otherwise, even though process is terminated, there may be some data left
+        // in stdout/stderr buffers, so don't switch execution to 'finished' state
+        // until they are read out and closed.
+        assert!(p.status.is_none());
+        p.status = Some(status);
+        if !p.finished() {
+            return Ok(());
+        }
+
+        stage.execution.as_mut().unwrap().state = ExecutionState::Finished(status);
+
         Ok(())
     }
 
@@ -162,31 +184,43 @@ impl App {
     }
 
     fn handle_stdout(&mut self, i: usize, buf: &[u8]) {
-        if buf.is_empty() {
-            let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
-                panic!("unexpected state");
-            };
-            p.stdout = None;
+        let stage = &mut self.pipeline[i];
+
+        // Stage must be active.
+        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+            panic!("invalid state");
+        };
+
+        if !buf.is_empty() {
+            output.push_slice(buf);
             return;
         }
 
-        let stage = &mut self.pipeline[i];
-        let execution = stage.execution.as_mut().unwrap();
-        execution.output.push_slice(buf);
+        // Stdout is closed.
+        p.stdout = None;
+        if p.finished() {
+            stage.execution.as_mut().unwrap().state = ExecutionState::Finished(p.status.unwrap());
+        }
     }
 
     fn handle_stderr(&mut self, i: usize, buf: &[u8]) {
-        if buf.is_empty() {
-            let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
-                panic!("unexpected state");
-            };
-            p.stderr = None;
+        let stage = &mut self.pipeline[i];
+
+        // Stage must be active.
+        let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+            panic!("invalid state");
+        };
+
+        if !buf.is_empty() {
+            output.push_slice(buf);
             return;
         }
 
-        let stage = &mut self.pipeline[i];
-        let execution = stage.execution.as_mut().unwrap();
-        execution.output.push_slice(buf);
+        // Stdout is closed.
+        p.stderr = None;
+        if p.finished() {
+            stage.execution.as_mut().unwrap().state = ExecutionState::Finished(p.status.unwrap());
+        }
     }
 }
 
@@ -333,7 +367,14 @@ fn start_command(command: &str, stdin: bool) -> std::io::Result<Execution> {
     assert!(stdout.is_some() && stderr.is_some());
 
     Ok(Execution {
-        state: ExecutionState::Running(Process { child, stdin, stdout, stderr, bytes_written_to_stdin: 0 }),
+        state: ExecutionState::Running(Process {
+            child,
+            status: None,
+            stdin,
+            stdout,
+            stderr,
+            bytes_written_to_stdin: 0,
+        }),
         output: AppendOnlyBytes::new(),
     })
 }
@@ -368,7 +409,10 @@ async fn run_app(
             app.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, stage)| {
                 let Some(Execution {state: ExecutionState::Running(p), output, ..}) = &mut stage.execution else { return None };
 
-                exit_futures.push(p.child.wait().map(move |status| (i, status)));
+                if p.status.is_none() {
+                    exit_futures.push(p.child.wait().map(move |status| (i, status)));
+                }
+
                 if let (Some(stdin), Some(prev_stdout)) = (&mut p.stdin, prev_stdout) {
                     let bytes_written_to_stdin = p.bytes_written_to_stdin;
                     stdin_futures.push(async move {
