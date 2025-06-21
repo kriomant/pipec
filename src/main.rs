@@ -347,7 +347,7 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::raw("Exit program"),
             ]),
             Line::from(vec![
-                Span::styled("Alt-N  ", key_style),
+                Span::styled("Ctrд-N ", key_style),
                 Span::raw("Add new stage"),
             ]),
             Line::from(vec![
