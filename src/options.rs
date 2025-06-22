@@ -6,6 +6,9 @@ use clap::Parser;
 pub struct Options {
     pub commands: Vec<String>,
 
+    #[arg(long)]
+    pub print_command: bool,
+
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,
     #[arg(long)]

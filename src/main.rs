@@ -94,6 +94,8 @@ impl Stage {
 }
 
 struct App {
+    options: Options,
+
     input: Input,
     should_quit: bool,
     show_help: bool,
@@ -106,8 +108,10 @@ struct App {
 }
 
 impl App {
-    fn new(options: Options) -> App {
-        let mut pipeline: Vec<_> = options.commands.into_iter().map(Stage::with_command).collect();
+    fn new(mut options: Options) -> App {
+        let mut pipeline: Vec<_> = std::mem::take(&mut options.commands).into_iter()
+            .map(Stage::with_command)
+            .collect();
         if pipeline.is_empty() {
             pipeline.push(Stage::new());
         }
@@ -115,6 +119,7 @@ impl App {
         let input = Input::new(pipeline[focused_stage].command.clone());
 
         App {
+            options,
             input,
             should_quit: false,
             show_help: true,
@@ -511,9 +516,9 @@ enum StageEvent {
 }
 
 async fn run_app(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     mut app: App,
-) -> io::Result<()> {
+) -> io::Result<App> {
     let mut term_event_reader = crossterm::event::EventStream::new();
 
     loop {
@@ -601,7 +606,7 @@ async fn run_app(
         }
     }
 
-    Ok(())
+    Ok(app)
 }
 
 #[tokio::main]
@@ -618,15 +623,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Setup terminal
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let mut writer = io::stderr();
+    execute!(writer, EnterAlternateScreen, EnableMouseCapture)?;
 
     // Panic handler to reset terminalAdd commentMore actions
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         disable_raw_mode().unwrap();
         execute!(
-            io::stdout(),
+            io::stderr(),
             LeaveAlternateScreen,
             DisableMouseCapture
         ).unwrap();
@@ -634,7 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_hook(info);
     }));
 
-    let backend = CrosstermBackend::new(stdout);
+    let backend = CrosstermBackend::new(writer);
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
@@ -650,8 +655,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
 
-    if let Err(err) = res {
-        println!("{:?}", err);
+    match res {
+        Ok(app) => {
+            if app.options.print_command {
+                for (i, stage) in app.pipeline.iter().enumerate() {
+                    if i != 0 {
+                        print!(" | ");
+                    }
+                    print!("{}", stage.command);
+                }
+                println!();
+            }
+        }
+        Err(err) => {
+            eprintln!("{:?}", err);
+        }
     }
 
     Ok(())
