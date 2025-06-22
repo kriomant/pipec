@@ -90,9 +90,34 @@ impl Stage {
             pending_command: None,
         }
     }
+
     /// Returns whether the current command differs from the command used in the last execution.
     fn command_changed(&self) -> bool {
         self.execution.as_ref().map(|e| e.command != self.command).unwrap_or(true)
+    }
+
+    /// Returns whether stage needs (re)execution.
+    fn needs_execution(&self) -> bool {
+        // Stage needs execution if …
+
+        // it wasn't executed at all
+        let Some(ex) = &self.execution else { return true };
+
+        // or execution was unsuccessful
+        let success = match &ex.state {
+            ExecutionState::Running(process) => process.status.map_or(true, |s| s.success()),
+            ExecutionState::Finished(exit_status) => exit_status.success(),
+        };
+        if !success {
+            return true;
+        }
+
+        // or command changed since last run
+        if ex.command != self.command {
+            return true;
+        }
+
+        false
     }
 }
 
@@ -193,8 +218,8 @@ impl App {
                         let stages = self.pipeline.iter_mut()
                             .enumerate()
                             // Skip starting stages which are still actual: they have been already executed
-                            // in the past and command didn't change since last execution.
-                            .skip_while(|(_, s)| !s.command_changed());
+                            // (successfully) in the past and command didn't change since last execution.
+                            .skip_while(|(_, s)| !s.needs_execution());
 
                         for (i, stage) in stages {
                             if let Some(execution) = &mut stage.execution &&
