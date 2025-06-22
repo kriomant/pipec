@@ -8,6 +8,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use futures::{stream::FuturesUnordered, FutureExt as _, StreamExt as _};
+use itertools::Itertools as _;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Flex, Layout, Position, Rect},
@@ -25,6 +26,8 @@ use tokio::{
 use tui_input::{backend::crossterm::EventHandler, Input};
 
 use crate::options::Options;
+
+mod parser;
 
 struct Process {
     child: Child,
@@ -108,31 +111,33 @@ struct App {
 }
 
 impl App {
-    fn new(mut options: Options) -> App {
-        let mut pipeline: Vec<_> = std::mem::take(&mut options.commands).into_iter()
-            .flat_map(|c| {
-                if options.parse_commands {
-                    c.split('|').map(|c| c.trim().to_string()).collect()
-                } else {
-                    vec![c]
-                }
-            })
-            .map(Stage::with_command)
-            .collect();
+    fn new(mut options: Options) -> Result<App, Box<dyn std::error::Error>> {
+        let mut commands = std::mem::take(&mut options.commands);
+        if options.parse_commands {
+            commands = commands.into_iter()
+                .map(|c| {
+                    parser::split_pipeline(&c)
+                        .map(|cmds| cmds.into_iter().map(|c| c.to_string()).collect::<Vec<_>>())
+                })
+                .flatten_ok()
+                .collect::<Result<Vec<_>, _>>()?;
+        };
+
+        let mut pipeline: Vec<_> = commands.into_iter().map(Stage::with_command).collect();
         if pipeline.is_empty() {
             pipeline.push(Stage::new());
         }
         let focused_stage = pipeline.len() - 1;
         let input = Input::new(pipeline[focused_stage].command.clone());
 
-        App {
+        Ok(App {
             options,
             input,
             should_quit: false,
             show_help: true,
             pipeline,
             focused_stage,
-        }
+        })
     }
 
     fn handle_input(&mut self, event: Event) {
@@ -687,7 +692,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let app = App::new(options);
+    let app = App::new(options)?;
     let res = run_app(&mut terminal, app).await;
 
     // Restore terminal

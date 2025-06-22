@@ -1,0 +1,31 @@
+# Grammar for command pipeline.
+# For our purposes it is enough to know boundaries of top-level commands
+# in pipeline, their structure isn't interesting to us. However, in order
+# to properly split pipeline it is needed to parse groups, strings, etc.
+
+@no_skip_ws
+Pipe = '|' !'|';
+
+@export
+Pipeline = first_command:TopLevelCommand { Pipe rest_commands:TopLevelCommand };
+
+@position
+TopLevelCommand = Command;
+
+Command = {Segment};
+
+Segment = @:Group | @:Subshell | @:String | @:Char;
+
+Group = '{' Command '}';
+Subshell = '(' Command ')';
+String = SingleQuoteString | DoubleQuoteString;
+Char = (!'|' char);
+
+@no_skip_ws
+DoubleQuoteString = '"' {('\\' char) | (!'"' char)} '"';
+
+@no_skip_ws
+SingleQuoteString = '\'' {!'\'' char} '\'';
+
+@no_skip_ws
+Whitespace = {' ' | '\t' | '\n' | '\r'};
