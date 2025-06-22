@@ -142,22 +142,25 @@ impl App {
                         }
                     }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        if !self.input.value().trim().is_empty() {
-                            self.show_help = false;
+                        self.show_help = false;
 
-                            // (Re)start all stages.
-                            for (i, stage) in self.pipeline.iter_mut().enumerate() {
-                                if let Some(execution) = &mut stage.execution &&
-                                   let ExecutionState::Running(process) = &mut execution.state
-                                {
-                                    // We can't immediately start new program instance because old one
-                                    // is still running. Remember current command and terminate old
-                                    // one.
-                                    stage.pending_command = Some(stage.command.clone());
-                                    process.child.start_kill().unwrap();
-                                } else {
-                                    stage.execution = Some(start_command(&stage.command, i != 0).unwrap());
-                                }
+                        let stages = self.pipeline.iter_mut()
+                            .enumerate()
+                            // Skip starting stages which are still actual: they have been already executed
+                            // in the past and command didn't change since last execution.
+                            .skip_while(|(_, s)| !s.command_changed());
+
+                        for (i, stage) in stages {
+                            if let Some(execution) = &mut stage.execution &&
+                                let ExecutionState::Running(process) = &mut execution.state
+                            {
+                                // We can't immediately start new program instance because old one
+                                // is still running. Remember current command and terminate old
+                                // one.
+                                stage.pending_command = Some(stage.command.clone());
+                                process.child.start_kill().unwrap();
+                            } else {
+                                stage.execution = Some(start_command(stage.command.clone(), i != 0).unwrap());
                             }
                         }
                     }
