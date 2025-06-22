@@ -210,6 +210,22 @@ impl App {
 
         p.bytes_written_to_stdin += bytes_written;
         log::debug!("stage {}: {} bytes written to stdin", i, p.bytes_written_to_stdin);
+
+        let total_written = p.bytes_written_to_stdin;
+        let should_close_stdin = {
+            let prev_exec = &mut self.pipeline[i-1].execution.as_ref().unwrap();
+            total_written ==
+                prev_exec.output.len() &&
+                matches!(prev_exec.state,
+                         ExecutionState::Finished(_) | ExecutionState::Running(Process {stdout: None, ..}))
+        };
+
+        if should_close_stdin {
+            let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
+                panic!("unexpected state");
+            };
+            p.stdin = None;
+        }
     }
 
     fn handle_stdout(&mut self, i: usize, buf: &[u8]) {
@@ -487,37 +503,39 @@ async fn run_app(
             let mut stderr_futures = FuturesUnordered::new();
 
             app.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, stage)| {
-                let Some(Execution {state: ExecutionState::Running(p), output, ..}) = &mut stage.execution else { return None };
+                let Some(Execution {state, output, ..}) = &mut stage.execution else { return None };
 
-                if p.status.is_none() {
-                    exit_futures.push(p.child.wait().map(move |status| (i, status)));
-                }
+                if let ExecutionState::Running(p) = state {
+                    if p.status.is_none() {
+                        exit_futures.push(p.child.wait().map(move |status| (i, status)));
+                    }
 
-                if let (Some(stdin), Some(prev_stdout)) = (&mut p.stdin, prev_stdout) {
-                    let bytes_written_to_stdin = p.bytes_written_to_stdin;
-                    if bytes_written_to_stdin < prev_stdout.len() {
-                        log::debug!("stage {}: {} of {} previous stage output bytes are written to stdin", i, p.bytes_written_to_stdin, prev_stdout.len());
-                        stdin_futures.push(async move {
-                            log::debug!("stage {}: schedule writing {} bytes", i, &prev_stdout.as_bytes()[bytes_written_to_stdin..].len());
-                            let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
-                            let res = stdin.write(buf).await;
-                            (i, res)
+                    if let (Some(stdin), Some(prev_stdout)) = (&mut p.stdin, prev_stdout) {
+                        let bytes_written_to_stdin = p.bytes_written_to_stdin;
+                        if bytes_written_to_stdin < prev_stdout.len() {
+                            log::debug!("stage {}: {} of {} previous stage output bytes are written to stdin", i, p.bytes_written_to_stdin, prev_stdout.len());
+                            stdin_futures.push(async move {
+                                log::debug!("stage {}: schedule writing {} bytes", i, &prev_stdout.as_bytes()[bytes_written_to_stdin..].len());
+                                let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
+                                let res = stdin.write(buf).await;
+                                (i, res)
+                            });
+                        }
+                    }
+                    if let Some(stdout) = &mut p.stdout {
+                        stdout_futures.push(async move {
+                            let mut buf = vec![0; 1024];
+                            let res = stdout.read(&mut buf).await;
+                            (i, res, buf)
                         });
                     }
-                }
-                if let Some(stdout) = &mut p.stdout {
-                    stdout_futures.push(async move {
-                        let mut buf = vec![0; 1024];
-                        let res = stdout.read(&mut buf).await;
-                        (i, res, buf)
-                    });
-                }
-                if let Some(stderr) = &mut p.stderr {
-                    stderr_futures.push(async move {
-                        let mut buf = vec![0; 1024];
-                        let res = stderr.read(&mut buf).await;
-                        (i, res, buf)
-                    });
+                    if let Some(stderr) = &mut p.stderr {
+                        stderr_futures.push(async move {
+                            let mut buf = vec![0; 1024];
+                            let res = stderr.read(&mut buf).await;
+                            (i, res, buf)
+                        });
+                    }
                 }
 
                 Some(output.clone().to_slice())
