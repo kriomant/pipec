@@ -147,6 +147,15 @@ impl App {
                         self.focused_stage = self.pipeline.len() - 1;
                         self.input.reset();
                     }
+                    KeyEvent { code: KeyCode::Char('d'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        if self.pipeline.len() > 1 {
+                            self.pipeline.remove(self.focused_stage);
+                            if self.focused_stage != 0 {
+                                self.focused_stage -= 1;
+                            }
+                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
+                        }
+                    }
                     KeyEvent { code: KeyCode::Up, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         // Move focus to previous stage.
                         if self.focused_stage != 0 {
@@ -392,8 +401,12 @@ fn ui(f: &mut Frame, app: &App) {
                 Span::raw("Exit program"),
             ]),
             Line::from(vec![
-                Span::styled("Ctrд-N ", key_style),
+                Span::styled("Ctrl-N ", key_style),
                 Span::raw("Add new stage"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-D ", key_style),
+                Span::raw("Delete focused stage"),
             ]),
             Line::from(vec![
                 Span::styled("↑/↓    ", key_style),
