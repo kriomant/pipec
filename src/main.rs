@@ -17,7 +17,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    fs::File, io::{self}, process::{ExitStatus, Stdio}
+    fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -481,8 +481,12 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
             ExecutionState::Finished(status) => {
                 if status.success() {
                     Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
-                } else {
+                } else if status.code().is_some() {
                     Span::styled("✖︎", Style::default().fg(Color::Red))  // Failed
+                } else if status.signal().is_some() {
+                    Span::styled("ѳ", Style::default().fg(Color::Red))  // Killed by signal
+                } else {
+                    Span::styled("?", Style::default().fg(Color::Red))  // Unknown
                 }
             }
         }
