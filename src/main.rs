@@ -80,6 +80,13 @@ impl Stage {
         }
     }
 
+    fn with_command(command: String) -> Self {
+        Self {
+            command,
+            execution: None,
+            pending_command: None,
+        }
+    }
     /// Returns whether the current command differs from the command used in the last execution.
     fn command_changed(&self) -> bool {
         self.execution.as_ref().map(|e| e.command != self.command).unwrap_or(true)
@@ -100,18 +107,19 @@ struct App {
 
 impl App {
     fn new(options: Options) -> App {
+        let mut pipeline: Vec<_> = options.commands.into_iter().map(Stage::with_command).collect();
+        if pipeline.is_empty() {
+            pipeline.push(Stage::new());
+        }
+        let focused_stage = pipeline.len() - 1;
+        let input = Input::new(pipeline[focused_stage].command.clone());
+
         App {
-            input: Input::default(),
+            input,
             should_quit: false,
             show_help: true,
-            pipeline: vec![
-                Stage {
-                    command: options.command.unwrap_or_default(),
-                    execution: None,
-                    pending_command: None,
-                },
-            ],
-            focused_stage: 0,
+            pipeline,
+            focused_stage,
         }
     }
 

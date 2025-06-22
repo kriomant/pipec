@@ -4,7 +4,7 @@ use clap::Parser;
 
 #[derive(Parser)]
 pub struct Options {
-    pub command: Option<String>,
+    pub commands: Vec<String>,
 
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,
