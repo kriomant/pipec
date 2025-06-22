@@ -110,6 +110,13 @@ struct App {
 impl App {
     fn new(mut options: Options) -> App {
         let mut pipeline: Vec<_> = std::mem::take(&mut options.commands).into_iter()
+            .flat_map(|c| {
+                if options.parse_commands {
+                    c.split('|').map(|c| c.trim().to_string()).collect()
+                } else {
+                    vec![c]
+                }
+            })
             .map(Stage::with_command)
             .collect();
         if pipeline.is_empty() {

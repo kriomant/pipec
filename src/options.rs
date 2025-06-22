@@ -6,6 +6,11 @@ use clap::Parser;
 pub struct Options {
     pub commands: Vec<String>,
 
+    /// Parse shell pipeline commands provided as arguments
+    /// into individual pipe commands.
+    #[arg(long)]
+    pub parse_commands: bool,
+
     #[arg(long)]
     pub print_command: bool,
 
