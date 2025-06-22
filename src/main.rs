@@ -142,9 +142,13 @@ impl App {
                     KeyEvent { code: KeyCode::Char('q'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.should_quit = true;
                     }
+                    KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        self.pipeline.insert(self.focused_stage, Stage::new());
+                        self.input.reset();
+                    }
                     KeyEvent { code: KeyCode::Char('n'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.pipeline.push(Stage::new());
-                        self.focused_stage = self.pipeline.len() - 1;
+                        self.focused_stage += 1;
+                        self.pipeline.insert(self.focused_stage, Stage::new());
                         self.input.reset();
                     }
                     KeyEvent { code: KeyCode::Char('d'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
@@ -402,7 +406,11 @@ fn ui(f: &mut Frame, app: &App) {
             ]),
             Line::from(vec![
                 Span::styled("Ctrl-N ", key_style),
-                Span::raw("Add new stage"),
+                Span::raw("Add new stage below"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-P ", key_style),
+                Span::raw("Add new stage above"),
             ]),
             Line::from(vec![
                 Span::styled("Ctrl-D ", key_style),
