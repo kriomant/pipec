@@ -160,6 +160,14 @@ impl App {
                             self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
                         }
                     }
+                    KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
+                        log::info!("hard-terminate executions");
+                        for stage in &mut self.pipeline {
+                            if let Some(Execution { state: ExecutionState::Running(Process { child, ..}), .. }) = &mut stage.execution {
+                                child.start_kill().unwrap();
+                            }
+                        }
+                    }
                     KeyEvent { code: KeyCode::Up, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         // Move focus to previous stage.
                         if self.focused_stage != 0 {
@@ -397,27 +405,31 @@ fn ui(f: &mut Frame, app: &App) {
         ]);
         let keys_help = Text::from(vec![
             Line::from(vec![
-                Span::styled("Enter  ", key_style),
+                Span::styled("Enter        ", key_style),
                 Span::raw("Execute command"),
             ]),
             Line::from(vec![
-                Span::styled("Ctrl+Q ", key_style),
+                Span::styled("Ctrl+Q       ", key_style),
                 Span::raw("Exit program"),
             ]),
             Line::from(vec![
-                Span::styled("Ctrl-N ", key_style),
+                Span::styled("Ctrl-N       ", key_style),
                 Span::raw("Add new stage below"),
             ]),
             Line::from(vec![
-                Span::styled("Ctrl-P ", key_style),
+                Span::styled("Ctrl-P       ", key_style),
                 Span::raw("Add new stage above"),
             ]),
             Line::from(vec![
-                Span::styled("Ctrl-D ", key_style),
+                Span::styled("Ctrl-D       ", key_style),
                 Span::raw("Delete focused stage"),
             ]),
             Line::from(vec![
-                Span::styled("↑/↓    ", key_style),
+                Span::styled("Ctrl-Shift-C ", key_style),
+                Span::raw("Hard-stop execution (send KILL)"),
+            ]),
+            Line::from(vec![
+                Span::styled("↑/↓          ", key_style),
                 Span::raw("Go to previous/next stage"),
             ]),
         ]);
