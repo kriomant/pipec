@@ -51,6 +51,7 @@ enum ExecutionState {
 }
 
 struct Execution {
+    command: String,
     state: ExecutionState,
     output: AppendOnlyBytes,
 }
@@ -77,6 +78,11 @@ impl Stage {
             execution: None,
             pending_command: None,
         }
+    }
+
+    /// Returns whether the current command differs from the command used in the last execution.
+    fn command_changed(&self) -> bool {
+        self.execution.as_ref().map(|e| e.command != self.command).unwrap_or(true)
     }
 }
 
@@ -178,7 +184,7 @@ impl App {
         // result of current execution, so just close buffers and start new
         // execution.
         if let Some(command) = stage.pending_command.take() {
-            stage.execution = Some(start_command(&command, i != 0)?);
+            stage.execution = Some(start_command(command, i != 0)?);
             return Ok(());
         }
 
@@ -234,7 +240,7 @@ impl App {
 
         let exit_status = {
             // Stage must be active.
-            let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+            let Some(Execution { state: ExecutionState::Running(p), output, .. }) = stage.execution.as_mut() else {
                 panic!("invalid state");
             };
 
@@ -277,7 +283,7 @@ impl App {
 
         let exit_status = {
             // Stage must be active.
-            let Some(Execution { state: ExecutionState::Running(p), output }) = stage.execution.as_mut() else {
+            let Some(Execution { state: ExecutionState::Running(p), output, .. }) = stage.execution.as_mut() else {
                 panic!("invalid state");
             };
 
@@ -415,8 +421,13 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
     let marker_color = if focused { Color::Green } else { Color::Gray };
     frame.render_widget(Span::styled("❯", Style::default().fg(marker_color)), marker_area);
 
-    // Command
-    frame.render_widget(Span::raw(&stage.command), command_area);
+    // Draw command.
+    // Commands changed from last execution are highlighted with bold.
+    let mut command_style = Style::default();
+    if stage.command_changed() {
+        command_style = command_style.bold()
+    }
+    frame.render_widget(Span::styled(&stage.command, command_style), command_area);
 
     // Status indicator
     let status_span = match &stage.execution {
@@ -439,7 +450,7 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
     return command_area.as_position();
 }
 
-fn start_command(command: &str, stdin: bool) -> std::io::Result<Execution> {
+fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", &command]);
@@ -463,6 +474,7 @@ fn start_command(command: &str, stdin: bool) -> std::io::Result<Execution> {
     assert!(stdout.is_some() && stderr.is_some());
 
     Ok(Execution {
+        command,
         state: ExecutionState::Running(Process {
             child,
             status: None,
