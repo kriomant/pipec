@@ -244,6 +244,8 @@ impl App {
                                 stage.execution = Some(start_command(stage.command.clone(), i != 0).unwrap());
                             }
                         }
+
+                        self.shown_stage = self.focused_stage;
                     }
                     KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.shown_stage = self.focused_stage;
