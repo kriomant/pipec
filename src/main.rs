@@ -133,6 +133,10 @@ struct App {
     // Index of focused pipe in `pipeline`.
     // This is command currently edited by user.
     focused_stage: usize,
+
+    // Index of shown pipe.
+    // This is pipe whose output is shown to user.
+    shown_stage: usize,
 }
 
 impl App {
@@ -154,6 +158,7 @@ impl App {
         }
         let focused_stage = pipeline.len() - 1;
         let input = Input::new(pipeline[focused_stage].command.clone());
+        let shown_stage = focused_stage;
 
         Ok(App {
             options,
@@ -162,6 +167,7 @@ impl App {
             show_help: true,
             pipeline,
             focused_stage,
+            shown_stage,
         })
     }
 
@@ -188,6 +194,10 @@ impl App {
                                 self.focused_stage -= 1;
                             }
                             self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
+
+                            if self.shown_stage >= self.pipeline.len() {
+                                self.shown_stage = self.pipeline.len() - 1;
+                            }
                         }
                     }
                     KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
@@ -234,6 +244,9 @@ impl App {
                                 stage.execution = Some(start_command(stage.command.clone(), i != 0).unwrap());
                             }
                         }
+                    }
+                    KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        self.shown_stage = self.focused_stage;
                     }
                     _ => {
                         self.input.handle_event(&event);
@@ -396,16 +409,22 @@ impl App {
 }
 
 fn ui(f: &mut Frame, app: &App) {
-    // Each stage takes one line.
-    let mut constraints: Vec<_> = app.pipeline.iter().map(|_| Constraint::Length(1)).collect();
-    // Output pane takes the rest.
-    constraints.push(Constraint::Min(0));
+    // Output of shown stage is displayed right before it. So shown stage and
+    // stages before it are shown above output area and others are shown below.
 
-    let stage_areas = Layout::default()
+    // Each stage takes one line.
+    let mut constraints: Vec<_> = std::iter::repeat(Constraint::Length(1))
+        .take(app.pipeline.len())
+        .collect();
+    // Output pane takes the rest.
+    constraints.insert(app.shown_stage+1, Constraint::Min(0));
+
+    let mut stage_areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
-        .split(f.area());
-    let (output_area, stage_areas) = stage_areas.split_last().unwrap();
+        .split(f.area())
+        .to_vec();
+    let output_area = stage_areas.remove(app.shown_stage+1);
 
     for (i, (stage, area)) in app.pipeline.iter().zip(stage_areas.iter()).enumerate() {
         let command_pos = render_stage(f, stage, *area, i == app.focused_stage);
@@ -419,9 +438,9 @@ fn ui(f: &mut Frame, app: &App) {
     }
 
     // Output area
-    let output = str::from_utf8(app.pipeline.last().unwrap().execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
+    let output = str::from_utf8(app.pipeline[app.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
     let output_widget = Paragraph::new(output);
-    f.render_widget(output_widget, *output_area);
+    f.render_widget(output_widget, output_area);
 
     if app.show_help {
         let key_style = Style::default().fg(Color::Yellow);
@@ -437,6 +456,10 @@ fn ui(f: &mut Frame, app: &App) {
             Line::from(vec![
                 Span::styled("Enter        ", key_style),
                 Span::raw("Execute command"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+Space   ", key_style),
+                Span::raw("Show output of current stage"),
             ]),
             Line::from(vec![
                 Span::styled("Ctrl+Q       ", key_style),
@@ -470,7 +493,7 @@ fn ui(f: &mut Frame, app: &App) {
                 Constraint::Length(keys_help.lines.len() as u16),
             ])
             .flex(Flex::Center)
-            .areas(*output_area);
+            .areas(output_area);
         let [introduction_area] =
             Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
             .flex(Flex::Center)
