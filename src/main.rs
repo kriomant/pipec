@@ -18,16 +18,75 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    collections::HashMap, fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
 };
 use tui_input::{backend::crossterm::EventHandler, Input};
 
+mod parser;
+mod options;
+
 use crate::options::Options;
 
-mod parser;
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+struct Id(usize);
+
+struct IdGenerator {
+    next_id: usize,
+}
+
+impl IdGenerator {
+    fn new() -> Self {
+        Self {
+            next_id: 0,
+        }
+    }
+
+    fn gen_id(&mut self) -> Id {
+        let id = self.next_id;
+        self.next_id += 1;
+        Id(id)
+    }
+}
+
+struct Execution {
+    /// Mapping from stage ID to index of corresponding
+    /// stage execution in `pipeline`.
+    index: HashMap<Id, usize>,
+
+    /// Sequence of commands being executed.
+    pipeline: Vec<StageExecution>,
+
+    interrupted: bool,
+}
+
+impl Execution {
+    fn new() -> Self {
+        Self {
+            index: HashMap::new(),
+            pipeline: Vec::new(),
+            interrupted: false,
+        }
+    }
+
+    fn get_stage(&self, id: Id) -> Option<&StageExecution> {
+        self.index.get(&id).cloned().map(|index| &self.pipeline[index])
+    }
+
+    fn finished(&self) -> bool {
+        self.pipeline.iter().all(|stage| stage.finished())
+    }
+
+    fn interrupt(&mut self) {
+        if self.interrupted { return }
+
+        for exec in &mut self.pipeline {
+            exec.interrupt();
+        }
+    }
+}
 
 struct Process {
     child: Child,
@@ -37,7 +96,7 @@ struct Process {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
 
-    // Number of bytes written to stdin from previous stage's output.
+    /// Number of bytes written to stdin from previous stage's output.
     bytes_written_to_stdin: usize,
 }
 impl Process {
@@ -46,88 +105,86 @@ impl Process {
     }
 }
 
-mod options;
-
-enum ExecutionState {
+enum ExecutionStageState {
     Running(Box<Process>),
     Finished(ExitStatus),
 }
 
-struct Execution {
+struct StageExecution {
     command: String,
-    state: ExecutionState,
+    state: ExecutionStageState,
     output: AppendOnlyBytes,
+}
+impl StageExecution {
+    fn may_reuse_for(&self, command: &str) -> bool {
+        if command != self.command {
+            return false;
+        }
+
+        match self.state {
+            ExecutionStageState::Running(_) => true,
+            ExecutionStageState::Finished(status) => status.success(),
+        }
+    }
+
+    fn interrupt(&mut self) {
+        if let ExecutionStageState::Running(process) = &mut self.state {
+            process.child.start_kill().unwrap();
+        }
+    }
+
+    fn finished(&self) -> bool {
+        matches!(self.state, ExecutionStageState::Finished(_))
+    }
 }
 
 struct Stage {
+    // Unique stage ID.
+    id: Id,
+
     // Current command entered by user.
     // It may not be the same command with wich `execution` is started.
     // And it's not necessary command which will be executed next.
     command: String,
-
-    // Process being executed or finished, together with it's output.
-    execution: Option<Execution>,
-
-    // Content of input at the moment Enter was pressed.
-    // If old child is still alive at this point, command in saved
-    // as pending awaiting until old child exits.
-    pending_command: Option<String>,
 }
 
 impl Stage {
-    fn new() -> Self {
+    fn new(id: Id) -> Self {
         Self {
+            id,
             command: String::new(),
-            execution: None,
-            pending_command: None,
         }
     }
 
-    fn with_command(command: String) -> Self {
+    fn with_command(id: Id, command: String) -> Self {
         Self {
+            id,
             command,
-            execution: None,
-            pending_command: None,
         }
     }
+}
 
-    /// Returns whether the current command differs from the command used in the last execution.
-    fn command_changed(&self) -> bool {
-        self.execution.as_ref().map(|e| e.command != self.command).unwrap_or(true)
-    }
-
-    /// Returns whether stage needs (re)execution.
-    fn needs_execution(&self) -> bool {
-        // Stage needs execution if …
-
-        // it wasn't executed at all
-        let Some(ex) = &self.execution else { return true };
-
-        // or execution was unsuccessful
-        let success = match &ex.state {
-            ExecutionState::Running(process) => process.status.is_none_or(|s| s.success()),
-            ExecutionState::Finished(exit_status) => exit_status.success(),
-        };
-        if !success {
-            return true;
-        }
-
-        // or command changed since last run
-        if ex.command != self.command {
-            return true;
-        }
-
-        false
-    }
+struct PendingExecution {
+    stage_id: Id,
+    command: String,
 }
 
 struct App {
     options: Options,
+    id_gen: IdGenerator,
 
     input: Input,
     should_quit: bool,
 
+    // Sequence of commands (stages) edited by user.
     pipeline: Vec<Stage>,
+
+    // Current execution.
+    execution: Execution,
+
+    // Pending execution.
+    // List of commands to execute when current execution is finished.
+    pending_execution: Vec<PendingExecution>,
 
     // Index of focused pipe in `pipeline`.
     // This is command currently edited by user.
@@ -135,11 +192,13 @@ struct App {
 
     // Index of shown pipe.
     // This is pipe whose output is shown to user.
-    shown_stage: usize,
+    shown_stage_index: usize,
 }
 
 impl App {
     fn new(mut options: Options) -> Result<App, Box<dyn std::error::Error>> {
+        let mut id_gen = IdGenerator::new();
+
         let mut commands = std::mem::take(&mut options.commands);
         if options.parse_commands {
             commands = commands.into_iter()
@@ -151,21 +210,24 @@ impl App {
                 .collect::<Result<Vec<_>, _>>()?;
         };
 
-        let mut pipeline: Vec<_> = commands.into_iter().map(Stage::with_command).collect();
+        let mut pipeline: Vec<_> = commands.into_iter().map(|cmd| Stage::with_command(id_gen.gen_id(), cmd)).collect();
         if pipeline.is_empty() {
-            pipeline.push(Stage::new());
+            pipeline.push(Stage::new(id_gen.gen_id()));
         }
         let focused_stage = pipeline.len() - 1;
         let input = Input::new(pipeline[focused_stage].command.clone());
         let shown_stage = focused_stage;
 
         Ok(App {
+            id_gen,
             options,
             input,
             should_quit: false,
             pipeline,
             focused_stage,
-            shown_stage,
+            shown_stage_index: shown_stage,
+            execution: Execution::new(),
+            pending_execution: Vec::new(),
         })
     }
 
@@ -178,9 +240,10 @@ impl App {
             .collect();
 
         // Output pane takes the rest.
-        let show_output = self.pipeline[self.shown_stage].execution.is_some();
+        let shown_stage = &self.pipeline[self.shown_stage_index];
+        let show_output = self.execution.index.contains_key(&shown_stage.id);
         if show_output {
-            constraints.insert(self.shown_stage+1, Constraint::Min(0));
+            constraints.insert(self.shown_stage_index+1, Constraint::Min(0));
         } else {
             // Show help when there is no output to show.
             constraints.insert(0, Constraint::Fill(1));
@@ -266,15 +329,18 @@ impl App {
 
         // Output area
         if show_output {
-            let output_area = areas.remove(self.shown_stage+1);
-            let output = str::from_utf8(self.pipeline[self.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
-            let output_widget = Paragraph::new(output);
-            f.render_widget(output_widget, output_area);
+            let output_area = areas.remove(self.shown_stage_index+1);
+            if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
+                let output = str::from_utf8(self.execution.pipeline[shown_stage_exec_index].output.as_bytes()).unwrap();
+                let output_widget = Paragraph::new(output);
+                f.render_widget(output_widget, output_area);
+            }
         }
 
         let stage_areas = areas;
         for (i, (stage, area)) in self.pipeline.iter().zip(stage_areas.iter()).enumerate() {
-            let command_pos = render_stage(f, stage, *area, i == self.focused_stage);
+            let exec = self.execution.get_stage(stage.id);
+            let command_pos = render_stage(f, stage, exec, *area, i == self.focused_stage);
 
             if self.focused_stage == i {
                 f.set_cursor_position((
@@ -295,12 +361,12 @@ impl App {
                         self.should_quit = true;
                     }
                     KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.pipeline.insert(self.focused_stage, Stage::new());
+                        self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
                         self.input.reset();
                     }
                     KeyEvent { code: KeyCode::Char('n'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.focused_stage += 1;
-                        self.pipeline.insert(self.focused_stage, Stage::new());
+                        self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
                         self.input.reset();
                     }
                     KeyEvent { code: KeyCode::Char('d'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
@@ -311,18 +377,17 @@ impl App {
                             }
                             self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
 
-                            if self.shown_stage >= self.pipeline.len() {
-                                self.shown_stage = self.pipeline.len() - 1;
+                            if self.shown_stage_index >= self.pipeline.len() {
+                                self.shown_stage_index = self.pipeline.len() - 1;
                             }
                         }
                     }
                     KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
                         log::info!("hard-terminate executions");
-                        for stage in &mut self.pipeline {
-                            if let Some(Execution { state: ExecutionState::Running(box Process { child, ..}), .. }) = &mut stage.execution {
-                                child.start_kill().unwrap();
-                            }
-                        }
+                        {
+                            let this = &mut *self;
+                            this.execution.interrupt();
+                        };
                     }
                     KeyEvent { code: KeyCode::Up, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         // Move focus to previous stage.
@@ -339,30 +404,11 @@ impl App {
                         }
                     }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        let stages = self.pipeline.iter_mut()
-                            .enumerate()
-                            // Skip starting stages which are still actual: they have been already executed
-                            // (successfully) in the past and command didn't change since last execution.
-                            .skip_while(|(_, s)| !s.needs_execution());
-
-                        for (i, stage) in stages {
-                            if let Some(execution) = &mut stage.execution &&
-                                let ExecutionState::Running(process) = &mut execution.state
-                            {
-                                // We can't immediately start new program instance because old one
-                                // is still running. Remember current command and terminate old
-                                // one.
-                                stage.pending_command = Some(stage.command.clone());
-                                process.child.start_kill().unwrap();
-                            } else {
-                                stage.execution = Some(start_command(stage.command.clone(), i != 0).unwrap());
-                            }
-                        }
-
-                        self.shown_stage = self.focused_stage;
+                        self.create_pending_execution();
+                        self.shown_stage_index = self.focused_stage;
                     }
                     KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.shown_stage = self.focused_stage;
+                        self.shown_stage_index = self.focused_stage;
                     }
                     _ => {
                         self.input.handle_event(&event);
@@ -374,24 +420,43 @@ impl App {
         }
     }
 
+    fn create_pending_execution(&mut self) {
+        self.pending_execution = self.pipeline.iter()
+            .map(|stage| PendingExecution { stage_id: stage.id, command: stage.command.clone() })
+            .collect();
+        self.execution.interrupt();
+    }
+
+    /// Start pending execution if current one is finished.
+    fn execute_pending(&mut self) {
+        let mut old_execution = std::mem::take(&mut self.execution.pipeline);
+        let pending_commands = std::mem::take(&mut self.pending_execution);
+
+        // Try to reuse parts of last execution.
+        let number_of_steps_to_reuse = pending_commands.iter().zip(old_execution.iter())
+            .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
+            .count();
+        self.execution.pipeline.extend(old_execution.drain(..number_of_steps_to_reuse));
+        for (i, cmd) in pending_commands.iter().enumerate().take(number_of_steps_to_reuse) {
+            self.execution.index.insert(cmd.stage_id, i);
+        }
+
+        for (i, exec) in pending_commands.into_iter().enumerate().skip(number_of_steps_to_reuse) {
+            self.execution.pipeline.push(start_command(exec.command, i != 0).unwrap());
+            self.execution.index.insert(exec.stage_id, self.execution.pipeline.len()-1);
+        }
+    }
+
     fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
         log::info!("stage {i}: teminated: {status:?}");
-        let stage = &mut self.pipeline[i];
+        let stage = &mut self.execution.pipeline[i];
 
         // Stage must be active.
-        let Some(Execution { state: ExecutionState::Running(p), .. }) = stage.execution.as_mut() else {
+        let StageExecution { state: ExecutionStageState::Running(p), .. } = stage else {
             panic!("invalid state");
         };
 
-        // If there is pending command, then we are not interested in complete
-        // result of current execution, so just close buffers and start new
-        // execution.
-        if let Some(command) = stage.pending_command.take() {
-            stage.execution = Some(start_command(command, i != 0)?);
-            return Ok(());
-        }
-
-        // Otherwise, even though process is terminated, there may be some data left
+        // Even though process is terminated, there may be some data left
         // in stdout/stderr buffers, so don't switch execution to 'finished' state
         // until they are read out and closed.
         assert!(p.status.is_none());
@@ -401,14 +466,14 @@ impl App {
         }
 
         log::info!("stage {i}: finished");
-        stage.execution.as_mut().unwrap().state = ExecutionState::Finished(status);
+        stage.state = ExecutionStageState::Finished(status);
 
         Ok(())
     }
 
     fn handle_stdin(&mut self, i: usize, bytes_written: usize) {
         log::info!("stage {i}: written {bytes_written} bytes to stdin");
-        let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
+        let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i] else {
             panic!("unexpected state");
         };
 
@@ -422,15 +487,15 @@ impl App {
 
         let total_written = p.bytes_written_to_stdin;
         let should_close_stdin = {
-            let prev_exec = &mut self.pipeline[i-1].execution.as_ref().unwrap();
+            let prev_exec = &mut self.execution.pipeline[i-1];
             total_written ==
                 prev_exec.output.len() &&
                 matches!(prev_exec.state,
-                         ExecutionState::Finished(_) | ExecutionState::Running(box Process {stdout: None, ..}))
+                         ExecutionStageState::Finished(_) | ExecutionStageState::Running(box Process {stdout: None, ..}))
         };
 
         if should_close_stdin {
-            let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
+            let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i] else {
                 panic!("unexpected state");
             };
             p.stdin = None;
@@ -439,11 +504,11 @@ impl App {
 
     fn handle_stdout(&mut self, i: usize, buf: &[u8]) {
         log::info!("stage {}: read {} bytes from stdout", i, buf.len());
-        let stage = &mut self.pipeline[i];
+        let stage = &mut self.execution.pipeline[i];
 
         let exit_status = {
             // Stage must be active.
-            let Some(Execution { state: ExecutionState::Running(p), output, .. }) = stage.execution.as_mut() else {
+            let StageExecution { state: ExecutionStageState::Running(p), output, .. } = stage else {
                 panic!("invalid state");
             };
 
@@ -465,14 +530,13 @@ impl App {
         };
 
         if let Some(exit_status) = exit_status {
-            let new_state = ExecutionState::Finished(exit_status);
-            stage.execution.as_mut().unwrap().state = new_state;
+            stage.state = ExecutionStageState::Finished(exit_status);
         }
 
         // Close stdin of next stage, if all data are already written.
-        let output_len = stage.execution.as_mut().unwrap().output.len();
+        let output_len = stage.output.len();
         if i < self.pipeline.len() - 1
-            && let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut()
+            && let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i+1]
             && p.bytes_written_to_stdin == output_len
         {
             p.stdin = None;
@@ -481,11 +545,11 @@ impl App {
 
     fn handle_stderr(&mut self, i: usize, buf: &[u8]) {
         log::info!("stage {}: read {} bytes from stderr", i, buf.len());
-        let stage = &mut self.pipeline[i];
+        let stage = &mut self.execution.pipeline[i];
 
         let exit_status = {
             // Stage must be active.
-            let Some(Execution { state: ExecutionState::Running(p), output, .. }) = stage.execution.as_mut() else {
+            let StageExecution { state: ExecutionStageState::Running(p), output, .. } = stage else {
                 panic!("invalid state");
             };
 
@@ -507,14 +571,13 @@ impl App {
         };
 
         if let Some(exit_status) = exit_status {
-            let new_state = ExecutionState::Finished(exit_status);
-            stage.execution.as_mut().unwrap().state = new_state;
+            stage.state = ExecutionStageState::Finished(exit_status);
         }
 
         // Close stdin of next stage, if all data are already written.
-        let output_len = stage.execution.as_mut().unwrap().output.len();
+        let output_len = stage.output.len();
         if i < self.pipeline.len() - 1
-            && let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut()
+            && let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i+1]
             && p.bytes_written_to_stdin == output_len
         {
             p.stdin = None;
@@ -524,7 +587,7 @@ impl App {
 
 /// Renders stage into given area.
 /// Returns position of command widget.
-fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> Position {
+fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>, area: Rect, focused: bool) -> Position {
     let [marker_area, command_area, status_area] = Layout
         ::horizontal([
             Constraint::Min(1),
@@ -541,17 +604,17 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
     // Draw command.
     // Commands changed from last execution are highlighted with bold.
     let mut command_style = Style::default();
-    if stage.command_changed() {
+    if exec.is_none_or(|e| e.command != stage.command) {
         command_style = command_style.bold()
     }
     frame.render_widget(Span::styled(&stage.command, command_style), command_area);
 
     // Status indicator
-    let status_span = match &stage.execution {
+    let status_span = match exec {
         None => Span::raw(" "),  // Command is running
         Some(ex) => match ex.state {
-            ExecutionState::Running(_) => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
-            ExecutionState::Finished(status) => {
+            ExecutionStageState::Running(_) => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
+            ExecutionStageState::Finished(status) => {
                 if status.success() {
                     Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
                 } else if status.code().is_some() {
@@ -571,7 +634,7 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
     command_area.as_position()
 }
 
-fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
+fn start_command(command: String, stdin: bool) -> std::io::Result<StageExecution> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", &command]);
@@ -594,9 +657,9 @@ fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
     let stderr = child.stderr.take();
     assert!(stdout.is_some() && stderr.is_some());
 
-    Ok(Execution {
+    Ok(StageExecution {
         command,
-        state: ExecutionState::Running(Box::new(Process {
+        state: ExecutionStageState::Running(Box::new(Process {
             child,
             status: None,
             stdin,
@@ -635,10 +698,10 @@ async fn run_app(
             let mut stdout_futures = FuturesUnordered::new();
             let mut stderr_futures = FuturesUnordered::new();
 
-            app.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, stage)| {
-                let Some(Execution {state, output, ..}) = &mut stage.execution else { return None };
+            app.execution.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, exec)| {
+                let StageExecution {state, output, ..} = exec;
 
-                if let ExecutionState::Running(p) = state {
+                if let ExecutionStageState::Running(p) = state {
                     if p.status.is_none() {
                         exit_futures.push(p.child.wait().map(move |status| (i, status)));
                     }
@@ -708,6 +771,10 @@ async fn run_app(
 
         if app.should_quit {
             break;
+        }
+
+        if !app.pending_execution.is_empty() && app.execution.finished() {
+            app.execute_pending();
         }
     }
 
