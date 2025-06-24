@@ -27,35 +27,16 @@ use tui_input::{backend::crossterm::EventHandler, Input};
 
 mod parser;
 mod options;
+mod id_generator;
 
 use crate::options::Options;
+use crate::id_generator::{Id, IdGenerator};
 
 fn status_running_span() -> Span<'static> { Span::styled("•", Style::default().fg(Color::Yellow)) }
 fn status_successful_span() -> Span<'static> { Span::styled("✔︎", Style::default().fg(Color::Green)) }
 fn status_failed_span() -> Span<'static> { Span::styled("✖︎", Style::default().fg(Color::Red)) }
 fn status_killed_span() -> Span<'static> { Span::styled("ѳ", Style::default().fg(Color::Red)) }
 fn status_unknown_span() -> Span<'static> { Span::styled("?", Style::default().fg(Color::Red)) }
-
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
-struct Id(usize);
-
-struct IdGenerator {
-    next_id: usize,
-}
-
-impl IdGenerator {
-    fn new() -> Self {
-        Self {
-            next_id: 0,
-        }
-    }
-
-    fn gen_id(&mut self) -> Id {
-        let id = self.next_id;
-        self.next_id += 1;
-        Id(id)
-    }
-}
 
 struct Execution {
     /// Mapping from stage ID to index of corresponding
