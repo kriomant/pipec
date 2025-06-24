@@ -1,4 +1,4 @@
-#![feature(result_option_map_or_default)]
+#![feature(result_option_map_or_default, box_patterns)]
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
 use clap::Parser;
@@ -49,7 +49,7 @@ impl Process {
 mod options;
 
 enum ExecutionState {
-    Running(Process),
+    Running(Box<Process>),
     Finished(ExitStatus),
 }
 
@@ -105,7 +105,7 @@ impl Stage {
 
         // or execution was unsuccessful
         let success = match &ex.state {
-            ExecutionState::Running(process) => process.status.map_or(true, |s| s.success()),
+            ExecutionState::Running(process) => process.status.is_none_or(|s| s.success()),
             ExecutionState::Finished(exit_status) => exit_status.success(),
         };
         if !success {
@@ -174,8 +174,7 @@ impl App {
         // stages before it are shown above output area and others are shown below.
 
         // Each stage takes one line.
-        let mut constraints: Vec<_> = std::iter::repeat(Constraint::Length(1))
-            .take(self.pipeline.len())
+        let mut constraints: Vec<_> = std::iter::repeat_n(Constraint::Length(1), self.pipeline.len())
             .collect();
 
         // Output pane takes the rest.
@@ -288,6 +287,7 @@ impl App {
 
 
     fn handle_input(&mut self, event: Event) {
+        #[allow(clippy::single_match)]
         match event {
             Event::Key(key) => {
                 match key {
@@ -319,7 +319,7 @@ impl App {
                     KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
                         log::info!("hard-terminate executions");
                         for stage in &mut self.pipeline {
-                            if let Some(Execution { state: ExecutionState::Running(Process { child, ..}), .. }) = &mut stage.execution {
+                            if let Some(Execution { state: ExecutionState::Running(box Process { child, ..}), .. }) = &mut stage.execution {
                                 child.start_kill().unwrap();
                             }
                         }
@@ -375,7 +375,7 @@ impl App {
     }
 
     fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
-        log::info!("stage {}: teminated: {:?}", i, status);
+        log::info!("stage {i}: teminated: {status:?}");
         let stage = &mut self.pipeline[i];
 
         // Stage must be active.
@@ -400,14 +400,14 @@ impl App {
             return Ok(());
         }
 
-        log::info!("stage {}: finished", i);
+        log::info!("stage {i}: finished");
         stage.execution.as_mut().unwrap().state = ExecutionState::Finished(status);
 
         Ok(())
     }
 
     fn handle_stdin(&mut self, i: usize, bytes_written: usize) {
-        log::info!("stage {}: written {} bytes to stdin", i, bytes_written);
+        log::info!("stage {i}: written {bytes_written} bytes to stdin");
         let Some(Execution { state: ExecutionState::Running(p), .. }) = &mut self.pipeline[i].execution else {
             panic!("unexpected state");
         };
@@ -426,7 +426,7 @@ impl App {
             total_written ==
                 prev_exec.output.len() &&
                 matches!(prev_exec.state,
-                         ExecutionState::Finished(_) | ExecutionState::Running(Process {stdout: None, ..}))
+                         ExecutionState::Finished(_) | ExecutionState::Running(box Process {stdout: None, ..}))
         };
 
         if should_close_stdin {
@@ -457,7 +457,7 @@ impl App {
             let finished = p.finished();
 
             if finished {
-                log::info!("stage {}: finished", i);
+                log::info!("stage {i}: finished");
                 p.status
             } else {
                 None
@@ -471,12 +471,11 @@ impl App {
 
         // Close stdin of next stage, if all data are already written.
         let output_len = stage.execution.as_mut().unwrap().output.len();
-        if i < self.pipeline.len() - 1 {
-            if let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut() {
-                if p.bytes_written_to_stdin == output_len {
-                    p.stdin = None;
-                }
-            }
+        if i < self.pipeline.len() - 1
+            && let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut()
+            && p.bytes_written_to_stdin == output_len
+        {
+            p.stdin = None;
         }
     }
 
@@ -500,7 +499,7 @@ impl App {
             let finished = p.finished();
 
             if finished {
-                log::info!("stage {}: finished", i);
+                log::info!("stage {i}: finished");
                 p.status
             } else {
                 None
@@ -514,12 +513,11 @@ impl App {
 
         // Close stdin of next stage, if all data are already written.
         let output_len = stage.execution.as_mut().unwrap().output.len();
-        if i < self.pipeline.len() - 1 {
-            if let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut() {
-                if p.bytes_written_to_stdin == output_len {
-                    p.stdin = None;
-                }
-            }
+        if i < self.pipeline.len() - 1
+            && let Some(Execution { state: ExecutionState::Running(p), .. }) = self.pipeline[i+1].execution.as_mut()
+            && p.bytes_written_to_stdin == output_len
+        {
+            p.stdin = None;
         }
     }
 }
@@ -570,7 +568,7 @@ fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> 
         .alignment(Alignment::Right);
     frame.render_widget(status, status_area);
 
-    return command_area.as_position();
+    command_area.as_position()
 }
 
 fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
@@ -584,7 +582,7 @@ fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
         cmd
     };
 
-    log::info!("start command: {:?}", cmd);
+    log::info!("start command: {cmd:?}");
     let mut child = cmd
         .kill_on_drop(true)
         .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
@@ -598,14 +596,14 @@ fn start_command(command: String, stdin: bool) -> std::io::Result<Execution> {
 
     Ok(Execution {
         command,
-        state: ExecutionState::Running(Process {
+        state: ExecutionState::Running(Box::new(Process {
             child,
             status: None,
             stdin,
             stdout,
             stderr,
             bytes_written_to_stdin: 0,
-        }),
+        })),
         output: AppendOnlyBytes::new(),
     })
 }
@@ -723,7 +721,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(logging) = &options.logging {
         let log_writer = File::create(options.log_file.as_ref().unwrap())?;
         env_logger::Builder::new()
-            .parse_filters(&logging)
+            .parse_filters(logging)
             .target(env_logger::Target::Pipe(Box::new(log_writer)))
             .try_init()?;
     }
@@ -775,7 +773,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(err) => {
-            eprintln!("{:?}", err);
+            eprintln!("{err:?}");
         }
     }
 
