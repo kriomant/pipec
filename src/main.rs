@@ -94,31 +94,21 @@ impl Execution {
     }
 }
 
-struct Process {
-    child: Child,
+enum ProcessStatus {
+    Running(Child),
+    Exited(ExitStatus),
+}
 
-    status: Option<ExitStatus>,
+struct StageExecution {
+    command: String,
+
+    status: ProcessStatus,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
 
     /// Number of bytes written to stdin from previous stage's output.
     bytes_written_to_stdin: usize,
-}
-impl Process {
-    fn finished(&self) -> bool {
-        self.status.is_some() && self.stdout.is_none() && self.stderr.is_none()
-    }
-}
-
-enum ExecutionStageState {
-    Running(Box<Process>),
-    Finished(ExitStatus),
-}
-
-struct StageExecution {
-    command: String,
-    state: ExecutionStageState,
     output: AppendOnlyBytes,
 }
 impl StageExecution {
@@ -127,20 +117,20 @@ impl StageExecution {
             return false;
         }
 
-        match self.state {
-            ExecutionStageState::Running(_) => true,
-            ExecutionStageState::Finished(status) => status.success(),
+        match self.status {
+            ProcessStatus::Running(_) => true,
+            ProcessStatus::Exited(status) => status.success(),
         }
     }
 
     fn interrupt(&mut self) {
-        if let ExecutionStageState::Running(process) = &mut self.state {
-            process.child.start_kill().unwrap();
+        if let ProcessStatus::Running(child) = &mut self.status {
+            child.start_kill().unwrap();
         }
     }
 
     fn finished(&self) -> bool {
-        matches!(self.state, ExecutionStageState::Finished(_))
+        matches!(self.status, ProcessStatus::Exited(_)) && self.stdout.is_none() && self.stderr.is_none()
     }
 }
 
@@ -476,58 +466,38 @@ impl App {
         }
     }
 
-    fn handle_process_terminated(&mut self, i: usize, status: ExitStatus) -> std::io::Result<()> {
-        log::info!("stage {i}: teminated: {status:?}");
+    fn handle_process_terminated(&mut self, i: usize, exit_status: ExitStatus) -> std::io::Result<()> {
+        log::info!("stage {i}: teminated: {exit_status:?}");
         let stage = &mut self.execution.pipeline[i];
 
-        // Stage must be active.
-        let StageExecution { state: ExecutionStageState::Running(p), .. } = stage else {
-            panic!("invalid state");
-        };
-
-        // Even though process is terminated, there may be some data left
-        // in stdout/stderr buffers, so don't switch execution to 'finished' state
-        // until they are read out and closed.
-        assert!(p.status.is_none());
-        p.status = Some(status);
-        if !p.finished() {
-            return Ok(());
-        }
-
+        assert!(matches!(stage.status, ProcessStatus::Running(_)));
         log::info!("stage {i}: finished");
-        stage.state = ExecutionStageState::Finished(status);
+        stage.status = ProcessStatus::Exited(exit_status);
 
         Ok(())
     }
 
     fn handle_stdin(&mut self, i: usize, bytes_written: usize) {
         log::info!("stage {i}: written {bytes_written} bytes to stdin");
-        let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i] else {
-            panic!("unexpected state");
-        };
+        let stage = &mut self.execution.pipeline[i];
 
         if bytes_written == 0 {
-            p.stdin = None;
+            stage.stdin = None;
             return;
         }
 
-        p.bytes_written_to_stdin += bytes_written;
-        log::debug!("stage {}: {} bytes written to stdin", i, p.bytes_written_to_stdin);
+        stage.bytes_written_to_stdin += bytes_written;
+        log::debug!("stage {}: {} bytes written to stdin", i, stage.bytes_written_to_stdin);
 
-        let total_written = p.bytes_written_to_stdin;
+        let total_written = stage.bytes_written_to_stdin;
         let should_close_stdin = {
             let prev_exec = &mut self.execution.pipeline[i-1];
-            total_written ==
-                prev_exec.output.len() &&
-                matches!(prev_exec.state,
-                         ExecutionStageState::Finished(_) | ExecutionStageState::Running(box Process {stdout: None, ..}))
+            total_written == prev_exec.output.len() && prev_exec.stdout.is_none()
         };
 
+        let stage = &mut self.execution.pipeline[i];
         if should_close_stdin {
-            let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i] else {
-                panic!("unexpected state");
-            };
-            p.stdin = None;
+            stage.stdin = None;
         }
     }
 
@@ -535,40 +505,21 @@ impl App {
         log::info!("stage {}: read {} bytes from stdout", i, buf.len());
         let stage = &mut self.execution.pipeline[i];
 
-        let exit_status = {
-            // Stage must be active.
-            let StageExecution { state: ExecutionStageState::Running(p), output, .. } = stage else {
-                panic!("invalid state");
-            };
-
-            if !buf.is_empty() {
-                output.push_slice(buf);
-                return;
-            }
-
-            // Stdout is closed.
-            p.stdout = None;
-            let finished = p.finished();
-
-            if finished {
-                log::info!("stage {i}: finished");
-                p.status
-            } else {
-                None
-            }
-        };
-
-        if let Some(exit_status) = exit_status {
-            stage.state = ExecutionStageState::Finished(exit_status);
+        if !buf.is_empty() {
+            stage.output.push_slice(buf);
+            return;
         }
+
+        // Stdout is closed.
+        stage.stdout = None;
 
         // Close stdin of next stage, if all data are already written.
         let output_len = stage.output.len();
-        if i < self.pipeline.len() - 1
-            && let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i+1]
-            && p.bytes_written_to_stdin == output_len
-        {
-            p.stdin = None;
+        if i < self.pipeline.len() - 1 {
+            let next_stage = &mut self.execution.pipeline[i+1];
+            if next_stage.bytes_written_to_stdin == output_len {
+                next_stage.stdin = None;
+            }
         }
     }
 
@@ -576,40 +527,21 @@ impl App {
         log::info!("stage {}: read {} bytes from stderr", i, buf.len());
         let stage = &mut self.execution.pipeline[i];
 
-        let exit_status = {
-            // Stage must be active.
-            let StageExecution { state: ExecutionStageState::Running(p), output, .. } = stage else {
-                panic!("invalid state");
-            };
-
-            if !buf.is_empty() {
-                output.push_slice(buf);
-                return;
-            }
-
-            // Stderr is closed.
-            p.stderr = None;
-            let finished = p.finished();
-
-            if finished {
-                log::info!("stage {i}: finished");
-                p.status
-            } else {
-                None
-            }
-        };
-
-        if let Some(exit_status) = exit_status {
-            stage.state = ExecutionStageState::Finished(exit_status);
+        if !buf.is_empty() {
+            stage.output.push_slice(buf);
+            return;
         }
+
+        // Stderr is closed.
+        stage.stderr = None;
 
         // Close stdin of next stage, if all data are already written.
         let output_len = stage.output.len();
-        if i < self.pipeline.len() - 1
-            && let StageExecution { state: ExecutionStageState::Running(p), .. } = &mut self.execution.pipeline[i+1]
-            && p.bytes_written_to_stdin == output_len
-        {
-            p.stdin = None;
+        if i < self.pipeline.len() - 1 {
+            let next_stage = &mut self.execution.pipeline[i+1];
+            if next_stage.bytes_written_to_stdin == output_len {
+                next_stage.stdin = None;
+            }
         }
     }
 }
@@ -641,9 +573,9 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
     // Status indicator
     let status_span = match exec {
         None => Span::raw(" "),  // Command is running
-        Some(ex) => match ex.state {
-            ExecutionStageState::Running(_) => status_running_span(),
-            ExecutionStageState::Finished(status) => {
+        Some(ex) => match ex.status {
+            ProcessStatus::Running(_) => status_running_span(),
+            ProcessStatus::Exited(status) => {
                 if status.success() {
                     status_successful_span()
                 } else if status.code().is_some() {
@@ -688,14 +620,11 @@ fn start_command(command: String, stdin: bool) -> std::io::Result<StageExecution
 
     Ok(StageExecution {
         command,
-        state: ExecutionStageState::Running(Box::new(Process {
-            child,
-            status: None,
-            stdin,
-            stdout,
-            stderr,
-            bytes_written_to_stdin: 0,
-        })),
+        status: ProcessStatus::Running(child),
+        stdin,
+        stdout,
+        stderr,
+        bytes_written_to_stdin: 0,
         output: AppendOnlyBytes::new(),
     })
 }
@@ -728,42 +657,38 @@ async fn run_app(
             let mut stderr_futures = FuturesUnordered::new();
 
             app.execution.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, exec)| {
-                let StageExecution {state, output, ..} = exec;
+                if let ProcessStatus::Running(child) = &mut exec.status {
+                    exit_futures.push(child.wait().map(move |status| (i, status)));
+                }
 
-                if let ExecutionStageState::Running(p) = state {
-                    if p.status.is_none() {
-                        exit_futures.push(p.child.wait().map(move |status| (i, status)));
-                    }
-
-                    if let (Some(stdin), Some(prev_stdout)) = (&mut p.stdin, prev_stdout) {
-                        let bytes_written_to_stdin = p.bytes_written_to_stdin;
-                        if bytes_written_to_stdin < prev_stdout.len() {
-                            log::debug!("stage {}: {} of {} previous stage output bytes are written to stdin", i, p.bytes_written_to_stdin, prev_stdout.len());
-                            stdin_futures.push(async move {
-                                log::debug!("stage {}: schedule writing {} bytes", i, &prev_stdout.as_bytes()[bytes_written_to_stdin..].len());
-                                let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
-                                let res = stdin.write(buf).await;
-                                (i, res)
-                            });
-                        }
-                    }
-                    if let Some(stdout) = &mut p.stdout {
-                        stdout_futures.push(async move {
-                            let mut buf = vec![0; 1024];
-                            let res = stdout.read(&mut buf).await;
-                            (i, res, buf)
-                        });
-                    }
-                    if let Some(stderr) = &mut p.stderr {
-                        stderr_futures.push(async move {
-                            let mut buf = vec![0; 1024];
-                            let res = stderr.read(&mut buf).await;
-                            (i, res, buf)
+                if let (Some(stdin), Some(prev_stdout)) = (&mut exec.stdin, prev_stdout) {
+                    let bytes_written_to_stdin = exec.bytes_written_to_stdin;
+                    if bytes_written_to_stdin < prev_stdout.len() {
+                        log::debug!("stage {}: {} of {} previous stage output bytes are written to stdin", i, exec.bytes_written_to_stdin, prev_stdout.len());
+                        stdin_futures.push(async move {
+                            log::debug!("stage {}: schedule writing {} bytes", i, &prev_stdout.as_bytes()[bytes_written_to_stdin..].len());
+                            let buf = &prev_stdout.as_bytes()[bytes_written_to_stdin..];
+                            let res = stdin.write(buf).await;
+                            (i, res)
                         });
                     }
                 }
+                if let Some(stdout) = &mut exec.stdout {
+                    stdout_futures.push(async move {
+                        let mut buf = vec![0; 1024];
+                        let res = stdout.read(&mut buf).await;
+                        (i, res, buf)
+                    });
+                }
+                if let Some(stderr) = &mut exec.stderr {
+                    stderr_futures.push(async move {
+                        let mut buf = vec![0; 1024];
+                        let res = stderr.read(&mut buf).await;
+                        (i, res, buf)
+                    });
+                }
 
-                Some(output.clone().to_slice())
+                Some(exec.output.clone().to_slice())
             });
 
             select! {
