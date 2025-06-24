@@ -169,6 +169,124 @@ impl App {
         })
     }
 
+    fn render(&self, f: &mut Frame) {
+        // Output of shown stage is displayed right before it. So shown stage and
+        // stages before it are shown above output area and others are shown below.
+
+        // Each stage takes one line.
+        let mut constraints: Vec<_> = std::iter::repeat(Constraint::Length(1))
+            .take(self.pipeline.len())
+            .collect();
+
+        // Output pane takes the rest.
+        let show_output = self.pipeline[self.shown_stage].execution.is_some();
+        if show_output {
+            constraints.insert(self.shown_stage+1, Constraint::Min(0));
+        } else {
+            // Show help when there is no output to show.
+            constraints.insert(0, Constraint::Fill(1));
+        }
+
+        let mut areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(f.area())
+            .to_vec();
+
+        if !show_output {
+            let help_area = areas.remove(0);
+            let key_style = Style::default().fg(Color::Yellow);
+
+            let introduction_text = Text::from(vec![
+                Line::from(""),
+                Line::from(Span::styled("Welcome to Plumber!", Style::default().fg(Color::Cyan))),
+                Line::from(""),
+                Line::from(vec![Span::raw("Type a command and press "), Span::styled("Enter", key_style), Span::raw(" to get started.")]),
+                Line::from(""),
+            ]);
+            let keys_help = Text::from(vec![
+                Line::from(vec![
+                    Span::styled("Enter        ", key_style),
+                    Span::raw("Execute command"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl+Space   ", key_style),
+                    Span::raw("Show output of current stage"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl+Q       ", key_style),
+                    Span::raw("Exit program"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl-N       ", key_style),
+                    Span::raw("Add new stage below"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl-P       ", key_style),
+                    Span::raw("Add new stage above"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl-D       ", key_style),
+                    Span::raw("Delete focused stage"),
+                ]),
+                Line::from(vec![
+                    Span::styled("Ctrl-Shift-C ", key_style),
+                    Span::raw("Hard-stop execution (send KILL)"),
+                ]),
+                Line::from(vec![
+                    Span::styled("↑/↓          ", key_style),
+                    Span::raw("Go to previous/next stage"),
+                ]),
+            ]);
+
+            let [introduction_area, keys_area] =
+                Layout::vertical([
+                    Constraint::Length(introduction_text.lines.len() as u16),
+                    Constraint::Length(keys_help.lines.len() as u16),
+                ])
+                .flex(Flex::Center)
+                .areas(help_area);
+            let [introduction_area] =
+                Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
+                .flex(Flex::Center)
+                .areas(introduction_area);
+            let [keys_area] =
+                Layout::horizontal([Constraint::Length(keys_help.width() as u16)])
+                .flex(Flex::Center)
+                .areas(keys_area);
+
+            f.render_widget(
+                Paragraph::new(introduction_text) .alignment(Alignment::Center),
+                introduction_area
+            );
+            f.render_widget(
+                Paragraph::new(keys_help),
+                keys_area
+            );
+        }
+
+        // Output area
+        if show_output {
+            let output_area = areas.remove(self.shown_stage+1);
+            let output = str::from_utf8(self.pipeline[self.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
+            let output_widget = Paragraph::new(output);
+            f.render_widget(output_widget, output_area);
+        }
+
+        let stage_areas = areas;
+        for (i, (stage, area)) in self.pipeline.iter().zip(stage_areas.iter()).enumerate() {
+            let command_pos = render_stage(f, stage, *area, i == self.focused_stage);
+
+            if self.focused_stage == i {
+                f.set_cursor_position((
+                    command_pos.x + self.input.visual_cursor() as u16,
+                    command_pos.y,
+                ));
+            }
+        }
+    }
+
+
     fn handle_input(&mut self, event: Event) {
         match event {
             Event::Key(key) => {
@@ -406,123 +524,6 @@ impl App {
     }
 }
 
-fn ui(f: &mut Frame, app: &App) {
-    // Output of shown stage is displayed right before it. So shown stage and
-    // stages before it are shown above output area and others are shown below.
-
-    // Each stage takes one line.
-    let mut constraints: Vec<_> = std::iter::repeat(Constraint::Length(1))
-        .take(app.pipeline.len())
-        .collect();
-
-    // Output pane takes the rest.
-    let show_output = app.pipeline[app.shown_stage].execution.is_some();
-    if show_output {
-        constraints.insert(app.shown_stage+1, Constraint::Min(0));
-    } else {
-        // Show help when there is no output to show.
-        constraints.insert(0, Constraint::Fill(1));
-    }
-
-    let mut areas = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(f.area())
-        .to_vec();
-
-    if !show_output {
-        let help_area = areas.remove(0);
-        let key_style = Style::default().fg(Color::Yellow);
-
-        let introduction_text = Text::from(vec![
-            Line::from(""),
-            Line::from(Span::styled("Welcome to Plumber!", Style::default().fg(Color::Cyan))),
-            Line::from(""),
-            Line::from(vec![Span::raw("Type a command and press "), Span::styled("Enter", key_style), Span::raw(" to get started.")]),
-            Line::from(""),
-        ]);
-        let keys_help = Text::from(vec![
-            Line::from(vec![
-                Span::styled("Enter        ", key_style),
-                Span::raw("Execute command"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl+Space   ", key_style),
-                Span::raw("Show output of current stage"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl+Q       ", key_style),
-                Span::raw("Exit program"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl-N       ", key_style),
-                Span::raw("Add new stage below"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl-P       ", key_style),
-                Span::raw("Add new stage above"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl-D       ", key_style),
-                Span::raw("Delete focused stage"),
-            ]),
-            Line::from(vec![
-                Span::styled("Ctrl-Shift-C ", key_style),
-                Span::raw("Hard-stop execution (send KILL)"),
-            ]),
-            Line::from(vec![
-                Span::styled("↑/↓          ", key_style),
-                Span::raw("Go to previous/next stage"),
-            ]),
-        ]);
-
-        let [introduction_area, keys_area] =
-            Layout::vertical([
-                Constraint::Length(introduction_text.lines.len() as u16),
-                Constraint::Length(keys_help.lines.len() as u16),
-            ])
-            .flex(Flex::Center)
-            .areas(help_area);
-        let [introduction_area] =
-            Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
-            .flex(Flex::Center)
-            .areas(introduction_area);
-        let [keys_area] =
-            Layout::horizontal([Constraint::Length(keys_help.width() as u16)])
-            .flex(Flex::Center)
-            .areas(keys_area);
-
-        f.render_widget(
-            Paragraph::new(introduction_text) .alignment(Alignment::Center),
-            introduction_area
-        );
-        f.render_widget(
-            Paragraph::new(keys_help),
-            keys_area
-        );
-    }
-
-    // Output area
-    if show_output {
-        let output_area = areas.remove(app.shown_stage+1);
-        let output = str::from_utf8(app.pipeline[app.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
-        let output_widget = Paragraph::new(output);
-        f.render_widget(output_widget, output_area);
-    }
-
-    let stage_areas = areas;
-    for (i, (stage, area)) in app.pipeline.iter().zip(stage_areas.iter()).enumerate() {
-        let command_pos = render_stage(f, stage, *area, i == app.focused_stage);
-
-        if app.focused_stage == i {
-            f.set_cursor_position((
-                command_pos.x + app.input.visual_cursor() as u16,
-                command_pos.y,
-            ));
-        }
-    }
-}
-
 /// Renders stage into given area.
 /// Returns position of command widget.
 fn render_stage(frame: &mut Frame, stage: &Stage, area: Rect, focused: bool) -> Position {
@@ -628,7 +629,7 @@ async fn run_app(
     let mut term_event_reader = crossterm::event::EventStream::new();
 
     loop {
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| app.render(f))?;
 
         let event = {
             let mut exit_futures = FuturesUnordered::new();
