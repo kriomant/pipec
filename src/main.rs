@@ -30,6 +30,12 @@ mod options;
 
 use crate::options::Options;
 
+fn status_running_span() -> Span<'static> { Span::styled("•", Style::default().fg(Color::Yellow)) }
+fn status_successful_span() -> Span<'static> { Span::styled("✔︎", Style::default().fg(Color::Green)) }
+fn status_failed_span() -> Span<'static> { Span::styled("✖︎", Style::default().fg(Color::Red)) }
+fn status_killed_span() -> Span<'static> { Span::styled("ѳ", Style::default().fg(Color::Red)) }
+fn status_unknown_span() -> Span<'static> { Span::styled("?", Style::default().fg(Color::Red)) }
+
 #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct Id(usize);
 
@@ -257,74 +263,7 @@ impl App {
 
         if !show_output {
             let help_area = areas.remove(0);
-            let key_style = Style::default().fg(Color::Yellow);
-
-            let introduction_text = Text::from(vec![
-                Line::from(""),
-                Line::from(Span::styled("Welcome to Plumber!", Style::default().fg(Color::Cyan))),
-                Line::from(""),
-                Line::from(vec![Span::raw("Type a command and press "), Span::styled("Enter", key_style), Span::raw(" to get started.")]),
-                Line::from(""),
-            ]);
-            let keys_help = Text::from(vec![
-                Line::from(vec![
-                    Span::styled("Enter        ", key_style),
-                    Span::raw("Execute command"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl+Space   ", key_style),
-                    Span::raw("Show output of current stage"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl+Q       ", key_style),
-                    Span::raw("Exit program"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl-N       ", key_style),
-                    Span::raw("Add new stage below"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl-P       ", key_style),
-                    Span::raw("Add new stage above"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl-D       ", key_style),
-                    Span::raw("Delete focused stage"),
-                ]),
-                Line::from(vec![
-                    Span::styled("Ctrl-Shift-C ", key_style),
-                    Span::raw("Hard-stop execution (send KILL)"),
-                ]),
-                Line::from(vec![
-                    Span::styled("↑/↓          ", key_style),
-                    Span::raw("Go to previous/next stage"),
-                ]),
-            ]);
-
-            let [introduction_area, keys_area] =
-                Layout::vertical([
-                    Constraint::Length(introduction_text.lines.len() as u16),
-                    Constraint::Length(keys_help.lines.len() as u16),
-                ])
-                .flex(Flex::Center)
-                .areas(help_area);
-            let [introduction_area] =
-                Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
-                .flex(Flex::Center)
-                .areas(introduction_area);
-            let [keys_area] =
-                Layout::horizontal([Constraint::Length(keys_help.width() as u16)])
-                .flex(Flex::Center)
-                .areas(keys_area);
-
-            f.render_widget(
-                Paragraph::new(introduction_text) .alignment(Alignment::Center),
-                introduction_area
-            );
-            f.render_widget(
-                Paragraph::new(keys_help),
-                keys_area
-            );
+            self.render_help(f, help_area);
         }
 
         // Output area
@@ -351,6 +290,96 @@ impl App {
         }
     }
 
+    fn render_help(&self, f: &mut Frame, area: Rect) {
+        let key_style = Style::default().fg(Color::Yellow);
+
+        let introduction_text = Text::from(vec![
+            Line::from(""),
+            Line::from(Span::styled("Welcome to Pipec!", Style::default().fg(Color::Cyan))),
+            Line::from(""),
+            Line::from(vec![Span::raw("Type a command and press "), Span::styled("Enter", key_style), Span::raw(" to get started.")]),
+        ]);
+        let keys_help = Text::from(vec![
+            Line::from(vec![
+                Span::styled("Enter        ", key_style),
+                Span::raw("Execute command"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+Space   ", key_style),
+                Span::raw("Show output of current stage"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl+Q       ", key_style),
+                Span::raw("Exit program"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-N       ", key_style),
+                Span::raw("Add new stage below"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-P       ", key_style),
+                Span::raw("Add new stage above"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-D       ", key_style),
+                Span::raw("Delete focused stage"),
+            ]),
+            Line::from(vec![
+                Span::styled("Ctrl-Shift-C ", key_style),
+                Span::raw("Hard-stop execution (send KILL)"),
+            ]),
+            Line::from(vec![
+                Span::styled("↑/↓          ", key_style),
+                Span::raw("Go to previous/next stage"),
+            ]),
+        ]);
+        let legend = Text::from(vec![
+            Line::from(vec![
+                status_running_span(),    Span::raw(" running      "), status_killed_span(),  Span::raw(" killed"),
+            ]),
+            Line::from(vec![
+                status_successful_span(), Span::raw(" successful   "), status_unknown_span(), Span::raw(" unknown"),
+            ]),
+            Line::from(vec![
+                status_failed_span(), Span::raw(" failed"),
+            ]),
+        ]);
+
+        let [introduction_area, keys_area, legend_area] =
+            Layout::vertical([
+                Constraint::Length(introduction_text.lines.len() as u16),
+                Constraint::Length(keys_help.lines.len() as u16),
+                Constraint::Length(legend.lines.len() as u16),
+            ])
+            .spacing(1)
+            .flex(Flex::Center)
+            .areas(area);
+        let [introduction_area] =
+            Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
+            .flex(Flex::Center)
+            .areas(introduction_area);
+        let [keys_area] =
+            Layout::horizontal([Constraint::Length(keys_help.width() as u16)])
+            .flex(Flex::Center)
+            .areas(keys_area);
+        let [legend_area] =
+            Layout::horizontal([Constraint::Length(legend.width() as u16)])
+            .flex(Flex::Center)
+            .areas(legend_area);
+
+        f.render_widget(
+            Paragraph::new(introduction_text) .alignment(Alignment::Center),
+            introduction_area
+        );
+        f.render_widget(
+            Paragraph::new(keys_help),
+            keys_area
+        );
+        f.render_widget(
+            Paragraph::new(legend),
+            legend_area
+        );
+    }
 
     fn handle_input(&mut self, event: Event) {
         #[allow(clippy::single_match)]
@@ -613,16 +642,16 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
     let status_span = match exec {
         None => Span::raw(" "),  // Command is running
         Some(ex) => match ex.state {
-            ExecutionStageState::Running(_) => Span::styled("•", Style::default().fg(Color::Yellow)),  // Command is running
+            ExecutionStageState::Running(_) => status_running_span(),
             ExecutionStageState::Finished(status) => {
                 if status.success() {
-                    Span::styled("✔︎", Style::default().fg(Color::Green))  // Success
+                    status_successful_span()
                 } else if status.code().is_some() {
-                    Span::styled("✖︎", Style::default().fg(Color::Red))  // Failed
+                    status_failed_span()
                 } else if status.signal().is_some() {
-                    Span::styled("ѳ", Style::default().fg(Color::Red))  // Killed by signal
+                    status_killed_span()
                 } else {
-                    Span::styled("?", Style::default().fg(Color::Red))  // Unknown
+                    status_unknown_span()
                 }
             }
         }
