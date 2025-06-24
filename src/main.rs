@@ -126,7 +126,6 @@ struct App {
 
     input: Input,
     should_quit: bool,
-    show_help: bool,
 
     pipeline: Vec<Stage>,
 
@@ -164,7 +163,6 @@ impl App {
             options,
             input,
             should_quit: false,
-            show_help: true,
             pipeline,
             focused_stage,
             shown_stage,
@@ -223,8 +221,6 @@ impl App {
                         }
                     }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        self.show_help = false;
-
                         let stages = self.pipeline.iter_mut()
                             .enumerate()
                             // Skip starting stages which are still actual: they have been already executed
@@ -418,33 +414,24 @@ fn ui(f: &mut Frame, app: &App) {
     let mut constraints: Vec<_> = std::iter::repeat(Constraint::Length(1))
         .take(app.pipeline.len())
         .collect();
-    // Output pane takes the rest.
-    constraints.insert(app.shown_stage+1, Constraint::Min(0));
 
-    let mut stage_areas = Layout::default()
+    // Output pane takes the rest.
+    let show_output = app.pipeline[app.shown_stage].execution.is_some();
+    if show_output {
+        constraints.insert(app.shown_stage+1, Constraint::Min(0));
+    } else {
+        // Show help when there is no output to show.
+        constraints.insert(0, Constraint::Fill(1));
+    }
+
+    let mut areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints(constraints)
         .split(f.area())
         .to_vec();
-    let output_area = stage_areas.remove(app.shown_stage+1);
 
-    for (i, (stage, area)) in app.pipeline.iter().zip(stage_areas.iter()).enumerate() {
-        let command_pos = render_stage(f, stage, *area, i == app.focused_stage);
-
-        if app.focused_stage == i {
-            f.set_cursor_position((
-                command_pos.x + app.input.visual_cursor() as u16,
-                command_pos.y,
-            ));
-        }
-    }
-
-    // Output area
-    let output = str::from_utf8(app.pipeline[app.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
-    let output_widget = Paragraph::new(output);
-    f.render_widget(output_widget, output_area);
-
-    if app.show_help {
+    if !show_output {
+        let help_area = areas.remove(0);
         let key_style = Style::default().fg(Color::Yellow);
 
         let introduction_text = Text::from(vec![
@@ -495,7 +482,7 @@ fn ui(f: &mut Frame, app: &App) {
                 Constraint::Length(keys_help.lines.len() as u16),
             ])
             .flex(Flex::Center)
-            .areas(output_area);
+            .areas(help_area);
         let [introduction_area] =
             Layout::horizontal([Constraint::Length(introduction_text.width() as u16)])
             .flex(Flex::Center)
@@ -513,6 +500,26 @@ fn ui(f: &mut Frame, app: &App) {
             Paragraph::new(keys_help),
             keys_area
         );
+    }
+
+    // Output area
+    if show_output {
+        let output_area = areas.remove(app.shown_stage+1);
+        let output = str::from_utf8(app.pipeline[app.shown_stage].execution.as_ref().map_or_default(|e| e.output.as_bytes())).unwrap();
+        let output_widget = Paragraph::new(output);
+        f.render_widget(output_widget, output_area);
+    }
+
+    let stage_areas = areas;
+    for (i, (stage, area)) in app.pipeline.iter().zip(stage_areas.iter()).enumerate() {
+        let command_pos = render_stage(f, stage, *area, i == app.focused_stage);
+
+        if app.focused_stage == i {
+            f.set_cursor_position((
+                command_pos.x + app.input.visual_cursor() as u16,
+                command_pos.y,
+            ));
+        }
     }
 }
 
