@@ -417,22 +417,34 @@ impl App {
 
     /// Start pending execution if current one is finished.
     fn execute_pending(&mut self) {
-        let mut old_execution = std::mem::take(&mut self.execution.pipeline);
+        assert!(self.execution.finished());
+
         let pending_commands = std::mem::take(&mut self.pending_execution);
+        self.execution.index.clear();
 
         // Try to reuse parts of last execution.
-        let number_of_steps_to_reuse = pending_commands.iter().zip(old_execution.iter())
+        // Execution stage may be reused if it's command matches one in pending execution,
+        // it is still running or successfully finished.
+        // Since execution stage is (intentionally) not directly tied to visible stage,
+        // but only though index, it may be reused event for another visible stage.
+        let number_of_steps_to_reuse = pending_commands.iter().zip(self.execution.pipeline.iter())
             .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
             .count();
-        self.execution.pipeline.extend(old_execution.drain(..number_of_steps_to_reuse));
+        self.execution.pipeline.truncate(number_of_steps_to_reuse);
         for (i, cmd) in pending_commands.iter().enumerate().take(number_of_steps_to_reuse) {
             self.execution.index.insert(cmd.stage_id, i);
         }
 
+        // Now add new (non-reused) stages.
         for (i, exec) in pending_commands.into_iter().enumerate().skip(number_of_steps_to_reuse) {
             self.execution.pipeline.push(start_command(exec.command, i != 0).unwrap());
             self.execution.index.insert(exec.stage_id, self.execution.pipeline.len()-1);
         }
+
+        // Validate indices in `index`, they all must point to valid execution pipeline stage.
+        assert!(self.execution.index.values().all(|&v| v < self.execution.pipeline.len()),
+            "pipeline len: {}, index: {:?}, reused: {}",
+            self.execution.pipeline.len(), self.execution.index, number_of_steps_to_reuse);
     }
 
     fn handle_process_terminated(&mut self, i: usize, exit_status: ExitStatus) -> std::io::Result<()> {
