@@ -122,21 +122,21 @@ struct Stage {
     // Current command entered by user.
     // It may not be the same command with wich `execution` is started.
     // And it's not necessary command which will be executed next.
-    command: String,
+    input: Input,
 }
 
 impl Stage {
     fn new(id: Id) -> Self {
         Self {
             id,
-            command: String::new(),
+            input: Input::new(String::new()),
         }
     }
 
     fn with_command(id: Id, command: String) -> Self {
         Self {
             id,
-            command,
+            input: Input::new(command),
         }
     }
 }
@@ -150,7 +150,6 @@ struct App {
     options: Options,
     id_gen: IdGenerator,
 
-    input: Input,
     should_quit: bool,
 
     // Sequence of commands (stages) edited by user.
@@ -192,13 +191,11 @@ impl App {
             pipeline.push(Stage::new(id_gen.gen_id()));
         }
         let focused_stage = pipeline.len() - 1;
-        let input = Input::new(pipeline[focused_stage].command.clone());
         let shown_stage = focused_stage;
 
         Ok(App {
             id_gen,
             options,
-            input,
             should_quit: false,
             pipeline,
             focused_stage,
@@ -250,13 +247,10 @@ impl App {
         let stage_areas = areas;
         for (i, (stage, area)) in self.pipeline.iter().zip(stage_areas.iter()).enumerate() {
             let exec = self.execution.get_stage(stage.id);
-            let command_pos = render_stage(f, stage, exec, *area, i == self.focused_stage);
+            let cursor_pos = render_stage(f, stage, exec, *area, i == self.focused_stage);
 
             if self.focused_stage == i {
-                f.set_cursor_position((
-                    command_pos.x + self.input.visual_cursor() as u16,
-                    command_pos.y,
-                ));
+                f.set_cursor_position(cursor_pos);
             }
         }
     }
@@ -362,12 +356,10 @@ impl App {
                     }
                     KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
-                        self.input.reset();
                     }
                     KeyEvent { code: KeyCode::Char('n'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.focused_stage += 1;
                         self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
-                        self.input.reset();
                     }
                     KeyEvent { code: KeyCode::Char('d'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         if self.pipeline.len() > 1 {
@@ -375,7 +367,6 @@ impl App {
                             if self.focused_stage != 0 {
                                 self.focused_stage -= 1;
                             }
-                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
 
                             if self.shown_stage_index >= self.pipeline.len() {
                                 self.shown_stage_index = self.pipeline.len() - 1;
@@ -393,14 +384,12 @@ impl App {
                         // Move focus to previous stage.
                         if self.focused_stage != 0 {
                             self.focused_stage -= 1;
-                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
                         }
                     }
                     KeyEvent { code: KeyCode::Down, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         // Move focus to next stage.
                         if self.focused_stage < self.pipeline.len() - 1 {
                             self.focused_stage += 1;
-                            self.input = Input::new(self.pipeline[self.focused_stage].command.clone());
                         }
                     }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
@@ -411,8 +400,7 @@ impl App {
                         self.shown_stage_index = self.focused_stage;
                     }
                     _ => {
-                        self.input.handle_event(&event);
-                        self.pipeline[self.focused_stage].command = self.input.value().to_string();
+                        self.pipeline[self.focused_stage].input.handle_event(&event);
                     }
                 }
             }
@@ -422,7 +410,7 @@ impl App {
 
     fn create_pending_execution(&mut self) {
         self.pending_execution = self.pipeline.iter()
-            .map(|stage| PendingExecution { stage_id: stage.id, command: stage.command.clone() })
+            .map(|stage| PendingExecution { stage_id: stage.id, command: stage.input.value().to_string() })
             .collect();
         self.execution.interrupt();
     }
@@ -528,7 +516,7 @@ impl App {
 }
 
 /// Renders stage into given area.
-/// Returns position of command widget.
+/// Returns cursor position.
 fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>, area: Rect, focused: bool) -> Position {
     let [marker_area, command_area, status_area] = Layout
         ::horizontal([
@@ -546,10 +534,13 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
     // Draw command.
     // Commands changed from last execution are highlighted with bold.
     let mut command_style = Style::default();
-    if exec.is_none_or(|e| e.command != stage.command) {
+    if exec.is_none_or(|e| e.command != stage.input.value()) {
         command_style = command_style.bold()
     }
-    frame.render_widget(Span::styled(&stage.command, command_style), command_area);
+    let scroll = stage.input.visual_scroll(command_area.width as usize - 1);
+    let command = Paragraph::new(Span::styled(stage.input.value(), command_style))
+        .scroll((0, scroll as u16));
+    frame.render_widget(command, command_area);
 
     // Status indicator
     let status_span = match exec {
@@ -573,7 +564,8 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
         .alignment(Alignment::Right);
     frame.render_widget(status, status_area);
 
-    command_area.as_position()
+    let cursor_offset = stage.input.visual_cursor().max(scroll) - scroll;
+    Position::new(command_area.x + cursor_offset as u16, command_area.y)
 }
 
 fn start_command(command: String, stdin: bool) -> std::io::Result<StageExecution> {
@@ -769,7 +761,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if i != 0 {
                         print!(" | ");
                     }
-                    print!("{}", stage.command);
+                    print!("{}", stage.input.value());
                 }
                 println!();
             }
