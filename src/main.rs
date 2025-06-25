@@ -123,20 +123,20 @@ struct Stage {
     // It may not be the same command with wich `execution` is started.
     // And it's not necessary command which will be executed next.
     input: Input,
+
+    enabled: bool,
 }
 
 impl Stage {
     fn new(id: Id) -> Self {
-        Self {
-            id,
-            input: Input::new(String::new()),
-        }
+        Self::with_command(id, String::new())
     }
 
     fn with_command(id: Id, command: String) -> Self {
         Self {
             id,
             input: Input::new(command),
+            enabled: true
         }
     }
 }
@@ -290,6 +290,10 @@ impl App {
                 Span::raw("Delete focused stage"),
             ]),
             Line::from(vec![
+                Span::styled("Ctrl-X       ", key_style),
+                Span::raw("Enable/disable focused stage"),
+            ]),
+            Line::from(vec![
                 Span::styled("Ctrl-Shift-C ", key_style),
                 Span::raw("Hard-stop execution (send KILL)"),
             ]),
@@ -373,6 +377,10 @@ impl App {
                             }
                         }
                     }
+                    KeyEvent { code: KeyCode::Char('x'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        let enabled = &mut self.pipeline[self.focused_stage].enabled;
+                        *enabled = !*enabled;
+                    }
                     KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
                         log::info!("hard-terminate executions");
                         {
@@ -410,6 +418,7 @@ impl App {
 
     fn create_pending_execution(&mut self) {
         self.pending_execution = self.pipeline.iter()
+            .filter(|stage| stage.enabled)
             .map(|stage| PendingExecution { stage_id: stage.id, command: stage.input.value().to_string() })
             .collect();
         self.execution.interrupt();
@@ -546,6 +555,9 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
     // Draw command.
     // Commands changed from last execution are highlighted with bold.
     let mut command_style = Style::default();
+    if !stage.enabled {
+        command_style = command_style.crossed_out();
+    }
     if exec.is_none_or(|e| e.command != stage.input.value()) {
         command_style = command_style.bold()
     }
