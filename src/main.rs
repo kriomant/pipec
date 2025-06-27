@@ -142,7 +142,12 @@ impl Stage {
 }
 
 struct PendingExecution {
-    stage_id: Id,
+    /// IDs of stages to associate with output of this command.
+    /// There are several IDs and not just one because disabled commands
+    /// are associated with output of preceeding enabled command.
+    stage_ids: Vec<Id>,
+
+    /// Command to execute.
     command: String,
 }
 
@@ -417,10 +422,25 @@ impl App {
     }
 
     fn create_pending_execution(&mut self) {
-        self.pending_execution = self.pipeline.iter()
-            .filter(|stage| stage.enabled)
-            .map(|stage| PendingExecution { stage_id: stage.id, command: stage.input.value().to_string() })
-            .collect();
+        self.pending_execution.clear();
+
+        // Create
+        for stage in &self.pipeline {
+            if stage.enabled {
+                self.pending_execution.push(PendingExecution {
+                    stage_ids: vec![stage.id],
+                    command: stage.input.value().to_string()
+                });
+            } else {
+                // Disabled commands are attached to preceeding enabled
+                // command and show it's output.
+                // Leading disabled commands are completely ignored.
+                if let Some(pending_stage) = self.pending_execution.last_mut() {
+                    pending_stage.stage_ids.push(stage.id);
+                }
+            }
+        }
+
         self.execution.interrupt();
     }
 
@@ -440,14 +460,18 @@ impl App {
             .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
             .count();
         self.execution.pipeline.truncate(number_of_steps_to_reuse);
-        for (i, cmd) in pending_commands.iter().enumerate().take(number_of_steps_to_reuse) {
-            self.execution.index.insert(cmd.stage_id, i);
+        for (i, exec) in pending_commands.iter().enumerate().take(number_of_steps_to_reuse) {
+            for &stage_id in &exec.stage_ids {
+                self.execution.index.insert(stage_id, i);
+            }
         }
 
         // Now add new (non-reused) stages.
         for (i, exec) in pending_commands.into_iter().enumerate().skip(number_of_steps_to_reuse) {
             self.execution.pipeline.push(start_command(exec.command, i != 0).unwrap());
-            self.execution.index.insert(exec.stage_id, self.execution.pipeline.len()-1);
+            for &stage_id in &exec.stage_ids {
+                self.execution.index.insert(stage_id, self.execution.pipeline.len()-1);
+            }
         }
 
         // Validate indices in `index`, they all must point to valid execution pipeline stage.
