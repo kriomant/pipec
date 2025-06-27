@@ -18,7 +18,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    collections::HashMap, fs::File, io::{self}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    collections::HashMap, fs::File, io::{self, ErrorKind}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -723,7 +723,14 @@ async fn run_app(
                     UiEvent::Stage(i, StageEvent::Exit(status?))
                 }
                 Some((i, res)) = stdin_futures.next() => {
-                    UiEvent::Stage(i, StageEvent::Stdin(res?))
+                    let n = match res {
+                        Ok(n) => n,
+                        // BrokenPipe is normal situation when process is terminated,
+                        // handle it same way as if stdin was properly closed.
+                        Err(err) if err.kind() == ErrorKind::BrokenPipe => 0,
+                        err => err?,
+                    };
+                    UiEvent::Stage(i, StageEvent::Stdin(n))
                 }
                 Some((i, res, buf)) = stdout_futures.next() => {
                     let bytes_read = res?;
