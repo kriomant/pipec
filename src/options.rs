@@ -1,6 +1,13 @@
 use std::{ffi::OsString, path::PathBuf};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+#[derive(ValueEnum, Clone, Copy)]
+pub enum PrintOnExit {
+    Nothing,
+    Pipeline,
+    Output,
+}
 
 #[derive(Parser)]
 pub struct Options {
@@ -11,8 +18,9 @@ pub struct Options {
     #[arg(long)]
     pub parse_commands: bool,
 
-    #[arg(long)]
-    pub print_command: bool,
+    /// What to print on program exit.
+    #[arg(long, default_value="nothing")]
+    pub print_on_exit: PrintOnExit,
 
     #[arg(long)]
     pub shell: Option<OsString>,

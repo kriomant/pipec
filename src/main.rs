@@ -18,7 +18,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    collections::HashMap, ffi::OsString, fs::File, io::{self, ErrorKind}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    collections::HashMap, ffi::OsString, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -29,7 +29,7 @@ mod parser;
 mod options;
 mod id_generator;
 
-use crate::options::Options;
+use crate::options::{Options, PrintOnExit};
 use crate::id_generator::{Id, IdGenerator};
 
 fn status_running_span() -> Span<'static> { Span::styled("•", Style::default().fg(Color::Yellow)) }
@@ -816,14 +816,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match res {
         Ok(app) => {
-            if app.options.print_command {
-                for (i, stage) in app.pipeline.iter().enumerate() {
-                    if i != 0 {
-                        print!(" | ");
+            match app.options.print_on_exit {
+                PrintOnExit::Pipeline => {
+                    for (i, stage) in app.pipeline.iter().enumerate() {
+                        if i != 0 {
+                            print!(" | ");
+                        }
+                        print!("{}", stage.input.value());
                     }
-                    print!("{}", stage.input.value());
+                    println!();
                 }
-                println!();
+                PrintOnExit::Output => {
+                    if let Some(stage) = app.execution.pipeline.last() {
+                        std::io::stdout().write_all(stage.output.as_bytes())?;
+                    }
+                }
+                PrintOnExit::Nothing => {}
             }
         }
         Err(err) => {
