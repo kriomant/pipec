@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
 use clap::Parser;
 
@@ -13,6 +13,9 @@ pub struct Options {
 
     #[arg(long)]
     pub print_command: bool,
+
+    #[arg(long)]
+    pub shell: Option<OsString>,
 
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,

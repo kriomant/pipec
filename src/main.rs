@@ -18,7 +18,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::{
-    collections::HashMap, fs::File, io::{self, ErrorKind}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    collections::HashMap, ffi::OsString, fs::File, io::{self, ErrorKind}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -153,6 +153,8 @@ struct PendingExecution {
 
 struct App {
     options: Options,
+    shell: OsString,
+
     id_gen: IdGenerator,
 
     should_quit: bool,
@@ -177,7 +179,7 @@ struct App {
 }
 
 impl App {
-    fn new(mut options: Options) -> Result<App, Box<dyn std::error::Error>> {
+    fn new(mut options: Options, shell: OsString) -> Result<App, Box<dyn std::error::Error>> {
         let mut id_gen = IdGenerator::new();
 
         let mut commands = std::mem::take(&mut options.commands);
@@ -201,6 +203,7 @@ impl App {
         Ok(App {
             id_gen,
             options,
+            shell,
             should_quit: false,
             pipeline,
             focused_stage,
@@ -468,7 +471,7 @@ impl App {
 
         // Now add new (non-reused) stages.
         for (i, exec) in pending_commands.into_iter().enumerate().skip(number_of_steps_to_reuse) {
-            self.execution.pipeline.push(start_command(exec.command, i != 0).unwrap());
+            self.execution.pipeline.push(self.start_command(exec.command, i != 0).unwrap());
             for &stage_id in &exec.stage_ids {
                 self.execution.index.insert(stage_id, self.execution.pipeline.len()-1);
             }
@@ -558,6 +561,38 @@ impl App {
             }
         }
     }
+
+    fn start_command(&self, command: String, stdin: bool) -> std::io::Result<StageExecution> {
+        let mut cmd = Command::new(&self.shell);
+        if cfg!(target_os = "windows") {
+            cmd.args(["/C", &command]);
+        } else {
+            cmd.args(["-c", &command]);
+        };
+
+        log::info!("start command: {cmd:?}");
+        let mut child = cmd
+            .kill_on_drop(true)
+            .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let stdin = child.stdin.take();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        assert!(stdout.is_some() && stderr.is_some());
+
+        Ok(StageExecution {
+            command,
+            status: ProcessStatus::Running(child),
+            stdin,
+            stdout,
+            stderr,
+            bytes_written_to_stdin: 0,
+            output: AppendOnlyBytes::new(),
+        })
+    }
+
 }
 
 /// Renders stage into given area.
@@ -614,40 +649,6 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
 
     let cursor_offset = stage.input.visual_cursor().max(scroll) - scroll;
     Position::new(command_area.x + cursor_offset as u16, command_area.y)
-}
-
-fn start_command(command: String, stdin: bool) -> std::io::Result<StageExecution> {
-    let mut cmd = if cfg!(target_os = "windows") {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", &command]);
-        cmd
-    } else {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", &command]);
-        cmd
-    };
-
-    log::info!("start command: {cmd:?}");
-    let mut child = cmd
-        .kill_on_drop(true)
-        .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdin = child.stdin.take();
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    assert!(stdout.is_some() && stderr.is_some());
-
-    Ok(StageExecution {
-        command,
-        status: ProcessStatus::Running(child),
-        stdin,
-        stdout,
-        stderr,
-        bytes_written_to_stdin: 0,
-        output: AppendOnlyBytes::new(),
-    })
 }
 
 enum UiEvent {
@@ -767,6 +768,10 @@ async fn run_app(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options::parse();
 
+    let shell = options.shell.clone()
+        .or_else(|| std::env::var_os("SHELL"))
+        .unwrap_or(OsString::from("/bin/sh"));
+
     if let Some(logging) = &options.logging {
         let log_writer = File::create(options.log_file.as_ref().unwrap())?;
         env_logger::Builder::new()
@@ -797,7 +802,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let app = App::new(options)?;
+    let app = App::new(options, shell)?;
     let res = run_app(&mut terminal, app).await;
 
     // Restore terminal
