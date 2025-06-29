@@ -20,6 +20,7 @@ log = "0.4.27"
 peginator = "0.7.0"
 itertools = "0.14.0"
 bstr = "1.12.0"
+recycle_vec = "1.1.2"
 
 [build-dependencies]
 peginator_codegen = "0.7.0"

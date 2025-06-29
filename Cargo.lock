@@ -1194,6 +1194,7 @@ dependencies = [
  "peginator",
  "peginator_codegen",
  "ratatui",
+ "recycle_vec",
  "tokio",
  "tui-input",
 ]
@@ -1341,6 +1342,12 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
 ]
+
+[[package]]
+name = "recycle_vec"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10e9cc122e426bc407b6645a97bd351c2678abbeffd2295e73ca854cd2f15aed"
 
 [[package]]
 name = "redox_syscall"

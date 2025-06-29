@@ -18,6 +18,7 @@ use ratatui::{
     widgets::Paragraph,
     Frame, Terminal,
 };
+use recycle_vec::VecExt;
 use std::{
     collections::HashMap, ffi::OsString, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
@@ -179,6 +180,11 @@ struct App {
     // Index of shown pipe.
     // This is pipe whose output is shown to user.
     shown_stage_index: usize,
+
+    // Caches which hold vector capacity for reuse.
+    invalid_line: String,
+    lines_cache: Vec<Line<'static>>,
+    spans_caches: Vec<Vec<Span<'static>>>,
 }
 
 impl App {
@@ -213,10 +219,14 @@ impl App {
             shown_stage_index: shown_stage,
             execution: Execution::new(),
             pending_execution: Vec::new(),
+
+            invalid_line: String::new(),
+            lines_cache: Vec::new(),
+            spans_caches: Vec::new(),
         })
     }
 
-    fn render(&self, f: &mut Frame) {
+    fn render(&mut self, f: &mut Frame) {
         // Output of shown stage is displayed right before it. So shown stage and
         // stages before it are shown above output area and others are shown below.
 
@@ -250,11 +260,19 @@ impl App {
             let output_area = areas.remove(self.shown_stage_index+1);
             if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
                 let buf = self.execution.pipeline[shown_stage_exec_index].output.as_bytes();
-                let invalid_line = UNICODE_REPLACEMENT_CODEPOINT.repeat(output_area.width as usize);
-                let text = render_binary(buf, output_area.as_size(), &invalid_line);
 
-                let output_widget = Paragraph::new(text);
-                f.render_widget(&output_widget, output_area);
+                // Create text, reusing vector allocations.
+                let mut lines = std::mem::take(&mut self.lines_cache).recycle();
+                lines.extend(self.spans_caches.drain(..).map(|v| Line { spans: v.recycle(), ..Default::default() }));
+
+                let mut text = Text::from(lines);
+                render_binary(buf, output_area.as_size(), &mut text, &mut self.invalid_line);
+
+                f.render_widget(&text, output_area);
+
+                // Save vector allocations for reuse.
+                self.spans_caches.extend(text.lines.iter_mut().map(|line| std::mem::take(&mut line.spans).recycle()));
+                self.lines_cache = text.lines.recycle();
             }
         }
 
@@ -848,11 +866,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Renders binary data into `Text`.
+/// Renders binary data into given `Text`.
 /// Valid UTF8 graphemes are rendered as is, invalid ones are replaced with
 /// Unicode Replacement codepoints.
-fn render_binary<'t, 'i: 't, 'b: 't>(buf: &'b [u8], area: Size, invalid_slice: &'i str) -> Text<'t> {
-    let mut text = Text::default();
+///
+/// This function is designed to reuse existing text. If size of area
+/// and data haven't changed since last render, then no new allocations should occur.
+fn render_binary<'t, 'i: 't, 'b: 't>(
+    buf: &'b [u8], area: Size, text: &mut Text<'t>, invalid_slice: &'i mut String
+) {
+    // Line full of Unicode Replacement codepoint, which is used to represent
+    // invalid bytes. We slice it to represent any number of such bytes in line
+    // without requiring additional memory.
+    if invalid_slice.len() < area.width as usize {
+        *invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(area.width as usize);
+    }
+
     let output = bstr::BStr::new(buf);
 
     let mut current_line = 0;
@@ -888,8 +917,6 @@ fn render_binary<'t, 'i: 't, 'b: 't>(buf: &'b [u8], area: Size, invalid_slice: &
             }
         }
     }
-
-    text
 }
 
 #[cfg(test)]
@@ -901,9 +928,11 @@ mod tests {
 
     #[test]
     fn test_render_binary_valid_utf8() {
-        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        let mut invalid_slice = String::new();
+        let mut text = Text::default();
+        render_binary(b"abcdef", Size::new(10, 1), &mut text, &mut invalid_slice);
         assert_eq!(
-            render_binary(b"abcdef", Size::new(10, 1), &invalid_slice),
+            text,
             Text {
                 lines: vec![
                     Line::from("abcdef"),
@@ -915,9 +944,11 @@ mod tests {
 
     #[test]
     fn test_render_binary_invalid_utf8() {
-        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        let mut invalid_slice = String::new();
+        let mut text = Text::default();
+        render_binary(b"abc\xffdef", Size::new(10, 1), &mut text, &mut invalid_slice);
         assert_eq!(
-            render_binary(b"abc\xffdef", Size::new(10, 1), &invalid_slice),
+            text,
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
@@ -930,9 +961,11 @@ mod tests {
 
     #[test]
     fn test_render_binary_renders_sequential_invalid_bytes_as_single_span() {
-        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        let mut invalid_slice = String::new();
+        let mut text = Text::default();
+        render_binary(b"abc\xff\xffdef", Size::new(10, 1), &mut text, &mut invalid_slice);
         assert_eq!(
-            render_binary(b"abc\xff\xffdef", Size::new(10, 1), &invalid_slice),
+            text,
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
@@ -947,10 +980,12 @@ mod tests {
     /// real lines in buffer.
     #[test]
     fn test_render_binary_allocates_lines_for_whole_area() {
-        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        let mut invalid_slice = String::new();
+        let mut text = Text::default();
+        render_binary(b"abc\xffdef", Size::new(10, 2), &mut text, &mut invalid_slice);
         assert_eq!(
+            text,
             // We render just one line, but are has two rows.
-            render_binary(b"abc\xffdef", Size::new(10, 2), &invalid_slice),
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
@@ -965,10 +1000,12 @@ mod tests {
     /// Tests that number of rendered lines is limited by area height.
     #[test]
     fn test_render_binary_number_of_lines_limited_by_area_height() {
-        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        let mut invalid_slice = String::new();
+        let mut text = Text::default();
+        render_binary(b"abc\ndef\nghi", Size::new(10, 2), &mut text, &mut invalid_slice);
         assert_eq!(
+            text,
             // We render just one line, but are has two rows.
-            render_binary(b"abc\ndef\nghi", Size::new(10, 2), &invalid_slice),
             Text::from(vec![
                 Line::from("abc"),
                 Line::from("def"),
