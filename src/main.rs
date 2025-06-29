@@ -1,6 +1,7 @@
 #![feature(result_option_map_or_default, box_patterns)]
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
+use bstr::ByteSlice;
 use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -246,8 +247,51 @@ impl App {
         if show_output {
             let output_area = areas.remove(self.shown_stage_index+1);
             if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
-                let output = str::from_utf8(self.execution.pipeline[shown_stage_exec_index].output.as_bytes()).unwrap();
-                let output_widget = Paragraph::new(output);
+                // Line full of Unicode Replacement codepoint, which is used to represent
+                // invalid bytes. We slice it to represent any number of such bytes in line
+                // without requiring additional memory.
+                let invalid_line = "\u{FFFD}".repeat(output_area.width as usize);
+
+                let bytes = self.execution.pipeline[shown_stage_exec_index].output.as_bytes();
+                let output = bstr::BStr::new(bytes);
+
+                let mut row = 0;
+                let mut rows = vec![Line::default(); output_area.height as usize];
+
+                'outer: for (newline, graphemes) in output.grapheme_indices()
+                    .chunk_by(|(_, _, str)| *str == "\n")
+                    .into_iter()
+                {
+                    if newline {
+                        row += graphemes.count();
+                        if row >= rows.len() {
+                            break 'outer;
+                        }
+                        continue;
+                    }
+
+                    for line in graphemes.chunks(output_area.width as usize).into_iter() {
+                        for (invalid, mut span) in line.chunk_by(|(_, _, g)| *g == "\u{FFFD}").into_iter() {
+                            let span = if invalid {
+                                Span::from(&invalid_line[.."\u{FFFD}".len()*span.count()])
+                            } else {
+                                let first = span.next().unwrap();
+                                let last = span.last().unwrap_or(first);
+                                let (start, end) = (first.0, last.1);
+                                Span::from(str::from_utf8(&bytes[start..end]).unwrap())
+                            };
+
+                            rows[row].spans.push(span);
+                        }
+
+                        row += 1;
+                        if row >= rows.len() {
+                            break 'outer;
+                        }
+                    }
+                }
+
+                let output_widget = Paragraph::new(rows);
                 f.render_widget(output_widget, output_area);
             }
         }
