@@ -1,4 +1,4 @@
-#![feature(result_option_map_or_default, box_patterns)]
+#![feature(result_option_map_or_default, box_patterns, import_trait_associated_functions)]
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
 use bstr::ByteSlice;
@@ -12,7 +12,7 @@ use futures::{stream::FuturesUnordered, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Flex, Layout, Position, Rect},
+    layout::{Alignment, Constraint, Direction, Flex, Layout, Position, Rect, Size},
     style::{Color, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
@@ -32,6 +32,8 @@ mod id_generator;
 
 use crate::options::{Options, PrintOnExit};
 use crate::id_generator::{Id, IdGenerator};
+
+const UNICODE_REPLACEMENT_CODEPOINT: &str = "\u{FFFD}";
 
 fn status_running_span() -> Span<'static> { Span::styled("•", Style::default().fg(Color::Yellow)) }
 fn status_successful_span() -> Span<'static> { Span::styled("✔︎", Style::default().fg(Color::Green)) }
@@ -247,52 +249,12 @@ impl App {
         if show_output {
             let output_area = areas.remove(self.shown_stage_index+1);
             if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
-                // Line full of Unicode Replacement codepoint, which is used to represent
-                // invalid bytes. We slice it to represent any number of such bytes in line
-                // without requiring additional memory.
-                let invalid_line = "\u{FFFD}".repeat(output_area.width as usize);
+                let buf = self.execution.pipeline[shown_stage_exec_index].output.as_bytes();
+                let invalid_line = UNICODE_REPLACEMENT_CODEPOINT.repeat(output_area.width as usize);
+                let text = render_binary(buf, output_area.as_size(), &invalid_line);
 
-                let bytes = self.execution.pipeline[shown_stage_exec_index].output.as_bytes();
-                let output = bstr::BStr::new(bytes);
-
-                let mut row = 0;
-                let mut rows = vec![Line::default(); output_area.height as usize];
-
-                'outer: for (newline, graphemes) in output.grapheme_indices()
-                    .chunk_by(|(_, _, str)| *str == "\n")
-                    .into_iter()
-                {
-                    if newline {
-                        row += graphemes.count();
-                        if row >= rows.len() {
-                            break 'outer;
-                        }
-                        continue;
-                    }
-
-                    for line in graphemes.chunks(output_area.width as usize).into_iter() {
-                        for (invalid, mut span) in line.chunk_by(|(_, _, g)| *g == "\u{FFFD}").into_iter() {
-                            let span = if invalid {
-                                Span::from(&invalid_line[.."\u{FFFD}".len()*span.count()])
-                            } else {
-                                let first = span.next().unwrap();
-                                let last = span.last().unwrap_or(first);
-                                let (start, end) = (first.0, last.1);
-                                Span::from(str::from_utf8(&bytes[start..end]).unwrap())
-                            };
-
-                            rows[row].spans.push(span);
-                        }
-
-                        row += 1;
-                        if row >= rows.len() {
-                            break 'outer;
-                        }
-                    }
-                }
-
-                let output_widget = Paragraph::new(rows);
-                f.render_widget(output_widget, output_area);
+                let output_widget = Paragraph::new(text);
+                f.render_widget(&output_widget, output_area);
             }
         }
 
@@ -884,4 +846,133 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Renders binary data into `Text`.
+/// Valid UTF8 graphemes are rendered as is, invalid ones are replaced with
+/// Unicode Replacement codepoints.
+fn render_binary<'t, 'i: 't, 'b: 't>(buf: &'b [u8], area: Size, invalid_slice: &'i str) -> Text<'t> {
+    let mut text = Text::default();
+    let output = bstr::BStr::new(buf);
+
+    let mut current_line = 0;
+    text.lines.resize(area.height as usize, Line::default());
+    for line in &mut text.lines {
+        line.spans.clear();
+    }
+
+    'outer: for (newline, graphemes) in output.grapheme_indices()
+        .chunk_by(|(_, _, str)| *str == "\n")
+        .into_iter()
+    {
+        if newline {
+            current_line += graphemes.count();
+            if current_line >= text.lines.len() {
+                break 'outer;
+            }
+            continue;
+        }
+
+        for line in graphemes.chunks(area.width as usize).into_iter() {
+            for (invalid, mut span) in line.chunk_by(|(_, _, g)| *g == UNICODE_REPLACEMENT_CODEPOINT).into_iter() {
+                let span = if invalid {
+                    Span::from(&invalid_slice[..UNICODE_REPLACEMENT_CODEPOINT.len()*span.count()])
+                } else {
+                    let first = span.next().unwrap();
+                    let last = span.last().unwrap_or(first);
+                    let (start, end) = (first.0, last.1);
+                    Span::from(str::from_utf8(&buf[start..end]).unwrap())
+                };
+
+                text.lines[current_line].spans.push(span);
+            }
+        }
+    }
+
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{layout::Size, text::{Line, Span, Text}};
+    use std::default::Default::default;
+
+    use crate::{render_binary, UNICODE_REPLACEMENT_CODEPOINT};
+
+    #[test]
+    fn test_render_binary_valid_utf8() {
+        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        assert_eq!(
+            render_binary(b"abcdef", Size::new(10, 1), &invalid_slice),
+            Text {
+                lines: vec![
+                    Line::from("abcdef"),
+                ],
+                ..default()
+            }
+        );
+    }
+
+    #[test]
+    fn test_render_binary_invalid_utf8() {
+        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        assert_eq!(
+            render_binary(b"abc\xffdef", Size::new(10, 1), &invalid_slice),
+            Text::from(vec![
+                Line::default().spans(vec![
+                    Span::from("abc"),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT),
+                    Span::from("def"),
+                ]),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_render_binary_renders_sequential_invalid_bytes_as_single_span() {
+        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        assert_eq!(
+            render_binary(b"abc\xff\xffdef", Size::new(10, 1), &invalid_slice),
+            Text::from(vec![
+                Line::default().spans(vec![
+                    Span::from("abc"),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT.repeat(2)),
+                    Span::from("def"),
+                ]),
+            ])
+        );
+    }
+
+    /// Tests that lines are allocated for whole area, even if there is less
+    /// real lines in buffer.
+    #[test]
+    fn test_render_binary_allocates_lines_for_whole_area() {
+        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        assert_eq!(
+            // We render just one line, but are has two rows.
+            render_binary(b"abc\xffdef", Size::new(10, 2), &invalid_slice),
+            Text::from(vec![
+                Line::default().spans(vec![
+                    Span::from("abc"),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT),
+                    Span::from("def"),
+                ]),
+                Line::default(),
+            ])
+        );
+    }
+
+    /// Tests that number of rendered lines is limited by area height.
+    #[test]
+    fn test_render_binary_number_of_lines_limited_by_area_height() {
+        let invalid_slice = UNICODE_REPLACEMENT_CODEPOINT.repeat(20);
+        assert_eq!(
+            // We render just one line, but are has two rows.
+            render_binary(b"abc\ndef\nghi", Size::new(10, 2), &invalid_slice),
+            Text::from(vec![
+                Line::from("abc"),
+                Line::from("def"),
+            ])
+        );
+    }
 }
