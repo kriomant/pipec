@@ -13,7 +13,7 @@ use itertools::Itertools as _;
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Flex, Layout, Position, Rect, Size},
-    style::{Color, Style},
+    style::{Color, Style, Stylize as _},
     text::{Line, Span, Text},
     widgets::Paragraph,
     Frame, Terminal,
@@ -906,6 +906,7 @@ fn render_binary<'t, 'i: 't, 'b: 't>(
             for (invalid, mut span) in line.chunk_by(|(_, _, g)| *g == UNICODE_REPLACEMENT_CODEPOINT).into_iter() {
                 let span = if invalid {
                     Span::from(&invalid_slice[..UNICODE_REPLACEMENT_CODEPOINT.len()*span.count()])
+                        .light_red()
                 } else {
                     let first = span.next().unwrap();
                     let last = span.last().unwrap_or(first);
@@ -921,7 +922,7 @@ fn render_binary<'t, 'i: 't, 'b: 't>(
 
 #[cfg(test)]
 mod tests {
-    use ratatui::{layout::Size, text::{Line, Span, Text}};
+    use ratatui::{layout::Size, style::Stylize, text::{Line, Span, Text}};
     use std::default::Default::default;
 
     use crate::{render_binary, UNICODE_REPLACEMENT_CODEPOINT};
@@ -952,7 +953,7 @@ mod tests {
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
-                    Span::from(UNICODE_REPLACEMENT_CODEPOINT),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT).light_red(),
                     Span::from("def"),
                 ]),
             ])
@@ -969,7 +970,7 @@ mod tests {
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
-                    Span::from(UNICODE_REPLACEMENT_CODEPOINT.repeat(2)),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT.repeat(2)).light_red(),
                     Span::from("def"),
                 ]),
             ])
@@ -989,7 +990,7 @@ mod tests {
             Text::from(vec![
                 Line::default().spans(vec![
                     Span::from("abc"),
-                    Span::from(UNICODE_REPLACEMENT_CODEPOINT),
+                    Span::from(UNICODE_REPLACEMENT_CODEPOINT).light_red(),
                     Span::from("def"),
                 ]),
                 Line::default(),
