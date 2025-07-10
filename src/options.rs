@@ -26,16 +26,28 @@ pub struct Options {
     #[arg(long)]
     pub shell: Option<OsString>,
 
+    /// Pager program to use. Default: $PAGER, `less`.
+    #[arg(long)]
+    pub pager: Option<OsString>,
+
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,
     #[arg(long)]
     pub log_file: Option<PathBuf>,
 }
+
 impl Options {
     pub fn resolve_shell(&self) -> Cow<'_, OsStr> {
         self.shell.as_deref()
             .map(Cow::from)
             .or_else(|| std::env::var_os("SHELL").map(Cow::from))
             .unwrap_or(Cow::from(OsString::from("/bin/sh")))
+    }
+
+    pub fn resolve_pager(&self) -> Cow<'_, OsStr> {
+        self.pager.as_deref()
+            .map(Cow::from)
+            .or_else(|| std::env::var_os("PAGER").map(Cow::from))
+            .unwrap_or(Cow::from(OsString::from("less")))
     }
 }

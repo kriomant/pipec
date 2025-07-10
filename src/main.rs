@@ -693,7 +693,8 @@ impl App {
         )?;
         disable_raw_mode()?;
 
-        let mut cmd = Command::new("less");
+        let pager = self.options.resolve_pager();
+        let mut cmd = Command::new(pager);
         cmd.stdin(Stdio::piped());
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take();
