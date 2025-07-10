@@ -20,7 +20,7 @@ use ratatui::{
 };
 use recycle_vec::VecExt;
 use std::{
-    collections::HashMap, ffi::OsString, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
+    collections::HashMap, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::{Child, ChildStderr, ChildStdin, ChildStdout, Command}, select,
@@ -157,7 +157,6 @@ struct PendingExecution {
 
 struct App {
     options: Options,
-    shell: OsString,
 
     id_gen: IdGenerator,
 
@@ -191,7 +190,7 @@ struct App {
 }
 
 impl App {
-    fn new(mut options: Options, shell: OsString) -> Result<App, Box<dyn std::error::Error>> {
+    fn new(mut options: Options) -> Result<App, Box<dyn std::error::Error>> {
         let mut id_gen = IdGenerator::new();
 
         let mut commands = std::mem::take(&mut options.commands);
@@ -215,7 +214,6 @@ impl App {
         Ok(App {
             id_gen,
             options,
-            shell,
             should_quit: false,
             pipeline,
             focused_stage,
@@ -646,7 +644,7 @@ impl App {
     }
 
     fn start_command(&self, command: String, stdin: bool) -> std::io::Result<StageExecution> {
-        let mut cmd = Command::new(&self.shell);
+        let mut cmd = Command::new(self.options.resolve_shell());
         if cfg!(target_os = "windows") {
             cmd.args(["/C", &command]);
         } else {
@@ -937,10 +935,6 @@ async fn run_app(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options::parse();
 
-    let shell = options.shell.clone()
-        .or_else(|| std::env::var_os("SHELL"))
-        .unwrap_or(OsString::from("/bin/sh"));
-
     if let Some(logging) = &options.logging {
         let log_writer = File::create(options.log_file.as_ref().unwrap())?;
         env_logger::Builder::new()
@@ -971,7 +965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     // Create app and run it
-    let app = App::new(options, shell)?;
+    let app = App::new(options)?;
     let res = run_app(&mut terminal, app).await;
 
     // Restore terminal
