@@ -8,7 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{stream::FuturesUnordered, FutureExt as _, StreamExt as _};
+use futures::{future::OptionFuture, stream::FuturesUnordered, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use ratatui::{
     backend::CrosstermBackend,
@@ -185,6 +185,9 @@ struct App {
     invalid_line: String,
     lines_cache: Vec<Line<'static>>,
     spans_caches: Vec<Vec<Span<'static>>>,
+
+    /// External pager process.
+    pager: Option<Pager>,
 }
 
 impl App {
@@ -219,6 +222,7 @@ impl App {
             shown_stage_index: shown_stage,
             execution: Execution::new(),
             pending_execution: Vec::new(),
+            pager: None,
 
             invalid_line: String::new(),
             lines_cache: Vec::new(),
@@ -333,6 +337,10 @@ impl App {
                 Span::styled("↑/↓          ", key_style),
                 Span::raw("Go to previous/next stage"),
             ]),
+            Line::from(vec![
+                Span::styled("Ctrl-L       ", key_style),
+                Span::raw("View shown stage in pager"),
+            ]),
         ]);
         let legend = Text::from(vec![
             Line::from(vec![
@@ -438,6 +446,9 @@ impl App {
                     }
                     KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         self.shown_stage_index = self.focused_stage;
+                    }
+                    KeyEvent { code: KeyCode::Char('l'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        let _ = self.launch_pager();
                     }
                     _ => {
                         self.pipeline[self.focused_stage].input.handle_event(&event);
@@ -586,6 +597,49 @@ impl App {
         }
     }
 
+    fn handle_pager_stdin(&mut self, bytes_written: usize) {
+        let Some(pager) = self.pager.as_mut() else { return };
+
+        if bytes_written == 0 {
+            pager.stdin = None;
+            return;
+        }
+
+        pager.bytes_written += bytes_written;
+        log::debug!("pager: {} bytes written to stdin", pager.bytes_written);
+
+        let total_written = pager.bytes_written;
+        let should_close_stdin = {
+            let shown_stage_id = self.pipeline[self.shown_stage_index].id;
+            let Some(&exec_idx) = self.execution.index.get(&shown_stage_id) else { return };
+            let exec = &self.execution.pipeline[exec_idx];
+            total_written == exec.output.len() && exec.stdout.is_none()
+        };
+
+        if should_close_stdin {
+            pager.stdin = None;
+        }
+    }
+
+    fn handle_pager_exit(&mut self, exit_status: ExitStatus, terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> std::io::Result<()> {
+        log::info!("pager: teminated: {exit_status:?}");
+        assert!(self.pager.is_some());
+        self.pager = None;
+
+        execute!(
+            io::stderr(),
+            EnterAlternateScreen,
+            EnableMouseCapture
+        )?;
+        enable_raw_mode()?;
+
+        // It's not to clear terminal window, it's to make terminal acknowledge that
+        // it is invalidated and redraw it.
+        terminal.clear()?;
+
+        Ok(())
+    }
+
     fn start_command(&self, command: String, stdin: bool) -> std::io::Result<StageExecution> {
         let mut cmd = Command::new(&self.shell);
         if cfg!(target_os = "windows") {
@@ -617,6 +671,38 @@ impl App {
         })
     }
 
+    fn launch_pager(&mut self) -> std::io::Result<()> {
+        use tokio::process::Command;
+        use std::process::Stdio;
+
+        assert!(self.pager.is_none());
+
+        // Find stage execution index for shown stage.
+        let shown_id = self.pipeline[self.shown_stage_index].id;
+        if !self.execution.index.contains_key(&shown_id) {
+            return Ok(());
+        }
+
+        execute!(
+            io::stderr(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        disable_raw_mode()?;
+
+        let mut cmd = Command::new("less");
+        cmd.stdin(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take();
+
+        self.pager = Some(Pager {
+            process: child,
+            stdin,
+            bytes_written: 0,
+        });
+
+        Ok(())
+    }
 }
 
 /// Renders stage into given area.
@@ -678,6 +764,12 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
 enum UiEvent {
     Term(crossterm::event::Event),
     Stage(usize, StageEvent),
+    Pager(PagerEvent),
+}
+
+enum PagerEvent {
+    Exit(ExitStatus),
+    Stdin(usize),
 }
 
 enum StageEvent {
@@ -694,13 +786,29 @@ async fn run_app(
     let mut term_event_reader = crossterm::event::EventStream::new();
 
     loop {
-        terminal.draw(|f| app.render(f))?;
+        let pager_active = app.pager.is_some();
+
+        if !pager_active {
+            terminal.draw(|f| app.render(f))?;
+        }
 
         let event = {
             let mut exit_futures = FuturesUnordered::new();
             let mut stdin_futures = FuturesUnordered::new();
             let mut stdout_futures = FuturesUnordered::new();
             let mut stderr_futures = FuturesUnordered::new();
+            let mut pager_stdin_future: OptionFuture<_> = None.into();
+            let mut pager_exit_future: OptionFuture<_> = None.into();
+
+            let shown_exec_idx = app.execution.index.get(&app.pipeline[app.shown_stage_index].id).cloned();
+
+            let mut pager_data = None;
+            if let Some(pager) = app.pager.as_mut() {
+                pager_exit_future = Some(pager.process.wait()).into();
+                if let Some(stdin) = &mut pager.stdin {
+                    pager_data = Some((pager.bytes_written, stdin));
+                }
+            }
 
             app.execution.pipeline.iter_mut().enumerate().fold(None, |prev_stdout: Option<BytesSlice>, (i, exec)| {
                 if let ProcessStatus::Running(child) = &mut exec.status {
@@ -734,11 +842,28 @@ async fn run_app(
                     });
                 }
 
-                Some(exec.output.clone().to_slice())
+                let output = exec.output.slice(..);
+
+                if shown_exec_idx == Some(i)
+                    && let Some((written, pager_stdin)) = pager_data.take()
+                    && written < exec.output.len()
+                {
+                    pager_stdin_future = Some({
+                        let output = output.clone();
+                        async move {
+                            let buf = &output.as_bytes()[written..];
+                            let res = pager_stdin.write(buf).await;
+                            let _ = pager_stdin.flush().await;
+                            res
+                        }
+                    }).into();
+                }
+
+                Some(output)
             });
 
             select! {
-                result = term_event_reader.next() => {
+                result = term_event_reader.next(), if !pager_active => {
                     match result {
                         Some(Ok(event)) => UiEvent::Term(event),
                         _ => break
@@ -765,6 +890,19 @@ async fn run_app(
                     let bytes_read = res?;
                     UiEvent::Stage(i, StageEvent::Stderr(buf, bytes_read))
                 }
+                Some(res) = pager_stdin_future => {
+                    let n = match res {
+                        Ok(n) => n,
+                        // BrokenPipe is normal situation when process is terminated,
+                        // handle it same way as if stdin was properly closed.
+                        Err(err) if err.kind() == ErrorKind::BrokenPipe => 0,
+                        err => err?,
+                    };
+                    UiEvent::Pager(PagerEvent::Stdin(n))
+                }
+                Some(res) = pager_exit_future => {
+                    UiEvent::Pager(PagerEvent::Exit(res?))
+                }
             }
         };
 
@@ -774,6 +912,8 @@ async fn run_app(
             UiEvent::Stage(i, StageEvent::Stdin(n)) => app.handle_stdin(i, n),
             UiEvent::Stage(i, StageEvent::Stdout(buf, n)) => app.handle_stdout(i, &buf[..n]),
             UiEvent::Stage(i, StageEvent::Stderr(buf, n)) => app.handle_stderr(i, &buf[..n]),
+            UiEvent::Pager(PagerEvent::Stdin(n)) => app.handle_pager_stdin(n),
+            UiEvent::Pager(PagerEvent::Exit(status)) => app.handle_pager_exit(status, terminal)?,
         }
 
         if app.should_quit {
@@ -918,6 +1058,13 @@ fn render_binary<'t, 'i: 't, 'b: 't>(
             }
         }
     }
+}
+
+/// Struct to represent external pager process and its stdin.
+struct Pager {
+    process: tokio::process::Child,
+    stdin: Option<tokio::process::ChildStdin>,
+    bytes_written: usize,
 }
 
 #[cfg(test)]
