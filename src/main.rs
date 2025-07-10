@@ -573,6 +573,11 @@ impl App {
                 next_stage.stdin = None;
             }
         }
+
+        // Close external pager input.
+        if i == self.shown_stage_index && let Some(pager) = self.pager.as_mut() {
+            pager.stdin = None;
+        }
     }
 
     fn handle_stderr(&mut self, i: usize, buf: &[u8]) {
