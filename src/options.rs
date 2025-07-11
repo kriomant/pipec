@@ -30,6 +30,10 @@ pub struct Options {
     #[arg(long)]
     pub pager: Option<OsString>,
 
+    /// Editor program to use. Default: $VISUAL, $EDITOR, `vim`.
+    #[arg(long)]
+    pub editor: Option<OsString>,
+
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,
     #[arg(long)]
@@ -49,5 +53,13 @@ impl Options {
             .map(Cow::from)
             .or_else(|| std::env::var_os("PAGER").map(Cow::from))
             .unwrap_or(Cow::from(OsString::from("less")))
+    }
+
+    pub fn resolve_editor(&self) -> Cow<'_, OsStr> {
+        self.pager.as_deref()
+            .map(Cow::from)
+            .or_else(|| std::env::var_os("VISUAL").map(Cow::from))
+            .or_else(|| std::env::var_os("EDITOR").map(Cow::from))
+            .unwrap_or(Cow::from(OsString::from("vim")))
     }
 }

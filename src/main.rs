@@ -1,4 +1,4 @@
-#![feature(result_option_map_or_default, box_patterns, import_trait_associated_functions)]
+#![feature(result_option_map_or_default, box_patterns, import_trait_associated_functions, exit_status_error)]
 
 use append_only_bytes::{AppendOnlyBytes, BytesSlice};
 use bstr::ByteSlice;
@@ -8,7 +8,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use futures::{future::OptionFuture, stream::FuturesUnordered, FutureExt as _, StreamExt as _};
+use futures::{future::{BoxFuture, OptionFuture}, stream::FuturesUnordered, FutureExt as _, StreamExt as _};
 use itertools::Itertools as _;
 use ratatui::{
     backend::CrosstermBackend,
@@ -186,7 +186,7 @@ struct App {
     spans_caches: Vec<Vec<Span<'static>>>,
 
     /// External pager process.
-    pager: Option<Pager>,
+    external_process: Option<ExternalProcess>,
 }
 
 impl App {
@@ -220,7 +220,7 @@ impl App {
             shown_stage_index: shown_stage,
             execution: Execution::new(),
             pending_execution: Vec::new(),
-            pager: None,
+            external_process: None,
 
             invalid_line: String::new(),
             lines_cache: Vec::new(),
@@ -339,6 +339,10 @@ impl App {
                 Span::styled("Ctrl-L       ", key_style),
                 Span::raw("View shown stage in pager"),
             ]),
+            Line::from(vec![
+                Span::styled("Ctrl-V       ", key_style),
+                Span::raw("Edit focused stage in editor"),
+            ]),
         ]);
         let legend = Text::from(vec![
             Line::from(vec![
@@ -447,6 +451,10 @@ impl App {
                     }
                     KeyEvent { code: KeyCode::Char('l'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         let _ = self.launch_pager();
+                    }
+                    KeyEvent { code: KeyCode::Char('v'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        let command = self.pipeline[self.focused_stage].input.value().to_string();
+                        let _ = self.launch_editor(command);
                     }
                     _ => {
                         self.pipeline[self.focused_stage].input.handle_event(&event);
@@ -573,7 +581,9 @@ impl App {
         }
 
         // Close external pager input.
-        if i == self.shown_stage_index && let Some(pager) = self.pager.as_mut() {
+        if i == self.shown_stage_index
+            && let Some(ExternalProcess::Pager(pager)) = self.external_process.as_mut()
+        {
             pager.stdin = None;
         }
     }
@@ -601,7 +611,7 @@ impl App {
     }
 
     fn handle_pager_stdin(&mut self, bytes_written: usize) {
-        let Some(pager) = self.pager.as_mut() else { return };
+        let Some(ExternalProcess::Pager(pager)) = self.external_process.as_mut() else { return };
 
         if bytes_written == 0 {
             pager.stdin = None;
@@ -626,8 +636,8 @@ impl App {
 
     fn handle_pager_exit(&mut self, exit_status: ExitStatus, terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> std::io::Result<()> {
         log::info!("pager: teminated: {exit_status:?}");
-        assert!(self.pager.is_some());
-        self.pager = None;
+        assert!(matches!(self.external_process, Some(ExternalProcess::Pager(_))));
+        self.external_process = None;
 
         execute!(
             io::stderr(),
@@ -639,6 +649,21 @@ impl App {
         // It's not to clear terminal window, it's to make terminal acknowledge that
         // it is invalidated and redraw it.
         terminal.clear()?;
+
+        Ok(())
+    }
+
+    fn handle_editor_exit(&mut self, command: Option<String>, terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> std::io::Result<()> {
+        log::info!("editor: success: {}", command.is_some());
+        assert!(matches!(self.external_process, Some(ExternalProcess::Editor(_))));
+        self.external_process = None;
+
+        terminal.clear()?;
+
+        if let Some(command) = command {
+            let stage = &mut self.pipeline[self.focused_stage];
+            stage.input = Input::new(command);
+        }
 
         Ok(())
     }
@@ -678,7 +703,7 @@ impl App {
         use tokio::process::Command;
         use std::process::Stdio;
 
-        assert!(self.pager.is_none());
+        assert!(self.external_process.is_none());
 
         // Find stage execution index for shown stage.
         let shown_id = self.pipeline[self.shown_stage_index].id;
@@ -699,11 +724,59 @@ impl App {
         let mut child = cmd.spawn()?;
         let stdin = child.stdin.take();
 
-        self.pager = Some(Pager {
+        self.external_process = Some(ExternalProcess::Pager(Pager {
             process: child,
             stdin,
             bytes_written: 0,
-        });
+        }));
+
+        Ok(())
+    }
+
+    fn launch_editor(&mut self, mut contents: String) -> std::io::Result<()> {
+        assert!(self.external_process.is_none());
+
+        let editor = self.options.resolve_editor().into_owned();
+
+        let edit = async move {
+            let mut file = async_tempfile::TempFile::new().await?;
+            log::debug!("temporary file for editor: {}", file.file_path().to_string_lossy());
+            log::trace!("write command: {contents}");
+            file.write_all(contents.as_bytes()).await?;
+            contents.clear();
+
+            execute!(
+                io::stderr(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+            disable_raw_mode()?;
+
+            let mut cmd = tokio::process::Command::new(editor);
+            cmd.arg(file.file_path());
+            log::debug!("start editor: {cmd:?}");
+            cmd.spawn()?.wait().await?.exit_ok()?;
+
+            enable_raw_mode()?;
+            execute!(
+                io::stderr(),
+                EnterAlternateScreen,
+                EnableMouseCapture
+            )?;
+
+            let mut file = file.open_ro().await?;
+            file.read_to_string(&mut contents).await?;
+            log::trace!("editor: read contents: {contents}");
+
+            // Cleanup contents
+            contents = contents.trim().replace('\n', " ").to_string();
+
+            Ok::<_, Box<dyn std::error::Error>>(contents)
+        };
+
+        self.external_process = Some(ExternalProcess::Editor(async {
+            edit.await.ok()
+        }.boxed()));
 
         Ok(())
     }
@@ -769,6 +842,7 @@ enum UiEvent {
     Term(crossterm::event::Event),
     Stage(usize, StageEvent),
     Pager(PagerEvent),
+    EditorFinished(Option<String>),
 }
 
 enum PagerEvent {
@@ -790,9 +864,9 @@ async fn run_app(
     let mut term_event_reader = crossterm::event::EventStream::new();
 
     loop {
-        let pager_active = app.pager.is_some();
+        let external_program_active = app.external_process.is_some();
 
-        if !pager_active {
+        if !external_program_active {
             terminal.draw(|f| app.render(f))?;
         }
 
@@ -801,16 +875,26 @@ async fn run_app(
             let mut stdin_futures = FuturesUnordered::new();
             let mut stdout_futures = FuturesUnordered::new();
             let mut stderr_futures = FuturesUnordered::new();
+
             let mut pager_stdin_future: OptionFuture<_> = None.into();
             let mut pager_exit_future: OptionFuture<_> = None.into();
+
+            let mut editor_future: OptionFuture<_> = None.into();
 
             let shown_exec_idx = app.execution.index.get(&app.pipeline[app.shown_stage_index].id).cloned();
 
             let mut pager_data = None;
-            if let Some(pager) = app.pager.as_mut() {
-                pager_exit_future = Some(pager.process.wait()).into();
-                if let Some(stdin) = &mut pager.stdin {
-                    pager_data = Some((pager.bytes_written, stdin));
+            if let Some(p) = app.external_process.as_mut() {
+                match p {
+                    ExternalProcess::Pager(pager) => {
+                        pager_exit_future = Some(pager.process.wait()).into();
+                        if let Some(stdin) = &mut pager.stdin {
+                            pager_data = Some((pager.bytes_written, stdin));
+                        }
+                    }
+                    ExternalProcess::Editor(f) => {
+                        editor_future = Some(f).into();
+                    }
                 }
             }
 
@@ -867,11 +951,14 @@ async fn run_app(
             });
 
             select! {
-                result = term_event_reader.next(), if !pager_active => {
+                result = term_event_reader.next(), if !external_program_active => {
                     match result {
                         Some(Ok(event)) => UiEvent::Term(event),
                         _ => break
                     }
+                }
+                Some(cmd) = editor_future => {
+                    UiEvent::EditorFinished(cmd)
                 }
                 Some((i, status)) = exit_futures.next() => {
                     UiEvent::Stage(i, StageEvent::Exit(status?))
@@ -918,6 +1005,7 @@ async fn run_app(
             UiEvent::Stage(i, StageEvent::Stderr(buf, n)) => app.handle_stderr(i, &buf[..n]),
             UiEvent::Pager(PagerEvent::Stdin(n)) => app.handle_pager_stdin(n),
             UiEvent::Pager(PagerEvent::Exit(status)) => app.handle_pager_exit(status, terminal)?,
+            UiEvent::EditorFinished(cmd) => app.handle_editor_exit(cmd, terminal)?,
         }
 
         if app.should_quit {
@@ -1065,6 +1153,11 @@ struct Pager {
     process: tokio::process::Child,
     stdin: Option<tokio::process::ChildStdin>,
     bytes_written: usize,
+}
+
+enum ExternalProcess {
+    Pager(Pager),
+    Editor(BoxFuture<'static, Option<String>>),
 }
 
 #[cfg(test)]
