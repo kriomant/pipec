@@ -4,7 +4,7 @@ use append_only_bytes::{AppendOnlyBytes, BytesSlice};
 use bstr::ByteSlice;
 use clap::Parser;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -641,8 +641,7 @@ impl App {
 
         execute!(
             io::stderr(),
-            EnterAlternateScreen,
-            EnableMouseCapture
+            EnterAlternateScreen
         )?;
         enable_raw_mode()?;
 
@@ -760,8 +759,7 @@ impl App {
             enable_raw_mode()?;
             execute!(
                 io::stderr(),
-                EnterAlternateScreen,
-                EnableMouseCapture
+                EnterAlternateScreen
             )?;
 
             let mut file = file.open_ro().await?;
@@ -1035,9 +1033,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Setup terminal
     enable_raw_mode()?;
     let mut writer = io::stderr();
-    execute!(writer, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(writer, EnterAlternateScreen)?;
 
-    // Panic handler to reset terminalAdd commentMore actions
+    // Panic handler to reset terminal
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         disable_raw_mode().unwrap();
