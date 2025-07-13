@@ -4,6 +4,7 @@ use clap::{Parser, ValueEnum};
 
 #[derive(ValueEnum, Clone, Copy)]
 pub enum PrintOnExit {
+    Ask,
     Nothing,
     Pipeline,
     Output,
@@ -19,7 +20,7 @@ pub struct Options {
     pub parse_commands: bool,
 
     /// What to print on program exit.
-    #[arg(long, default_value="nothing")]
+    #[arg(long, default_value="ask")]
     pub print_on_exit: PrintOnExit,
 
     /// Shell to use. Default: $SHELL, `/bin/sh`.

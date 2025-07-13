@@ -32,15 +32,22 @@ mod id_generator;
 mod pipeline;
 mod ui;
 
-use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::Action, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
+use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
 use crate::id_generator::IdGenerator;
+
+enum QuitResult {
+    Success,
+    Cancel,
+    Pipeline(Vec<String>),
+    Output(BytesSlice),
+}
 
 struct App {
     options: Options,
 
     id_gen: IdGenerator,
 
-    should_quit: bool,
+    should_quit: Option<QuitResult>,
 
     // Sequence of commands (stages) edited by user.
     pipeline: Vec<Stage>,
@@ -64,6 +71,8 @@ struct App {
     invalid_line: String,
     lines_cache: Vec<Line<'static>>,
     spans_caches: Vec<Vec<Span<'static>>>,
+
+    popup: Option<KeysPopup>,
 
     /// External pager process.
     external_process: Option<ExternalProcess>,
@@ -94,12 +103,13 @@ impl App {
         Ok(App {
             id_gen,
             options,
-            should_quit: false,
+            should_quit: None,
             pipeline,
             focused_stage,
             shown_stage_index: shown_stage,
             execution: Execution::new(),
             pending_execution: Vec::new(),
+            popup: None,
             external_process: None,
 
             invalid_line: String::new(),
@@ -132,7 +142,7 @@ impl App {
             .split(f.area())
             .to_vec();
 
-        if !show_output {
+        if !show_output && self.popup.is_none() {
             let help_area = areas.remove(0);
             ui::utils::render_help(f, help_area);
         }
@@ -167,6 +177,10 @@ impl App {
                 f.set_cursor_position(cursor_pos);
             }
         }
+
+        if let Some(popup) = &self.popup {
+            popup.render(f, f.area());
+        }
     }
 
     fn handle_input(&mut self, event: Event) {
@@ -177,12 +191,41 @@ impl App {
     }
 
     fn get_action_for_event(&mut self, event: Event) -> Option<Action> {
+        if let Some(popup) = &mut self.popup {
+            if let Event::Key(key) = event
+                && key.code == KeyCode::Esc
+                && key.modifiers.is_empty()
+                && key.is_press()
+            {
+                self.popup = None;
+                return None;
+            }
+            return popup.get_action(event);
+        }
+
         #[allow(clippy::single_match)]
         match event {
             Event::Key(key) => {
                 match key {
                     KeyEvent { code: KeyCode::Char('q'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        Some(Action::Quit)
+                        let keys = match self.options.print_on_exit {
+                            PrintOnExit::Nothing => return Some(Action::Quit(QuitAction::Succeed)),
+                            PrintOnExit::Ask => vec![
+                                (KeyModifiers::empty(), KeyCode::Char('q'), "Quit without printing", Action::Quit(QuitAction::Succeed)),
+                                (KeyModifiers::empty(), KeyCode::Char('o'), "Quit and print output", Action::Quit(QuitAction::PrintOutput)),
+                                (KeyModifiers::empty(), KeyCode::Char('p'), "Quit and print pipeline", Action::Quit(QuitAction::PrintPipeline)),
+                            ],
+                            PrintOnExit::Pipeline => vec![
+                                (KeyModifiers::empty(), KeyCode::Char('y'), "Print pipeline and quit", Action::Quit(QuitAction::PrintPipeline)),
+                                (KeyModifiers::empty(), KeyCode::Char('n'), "Quit without printing", Action::Quit(QuitAction::Cancel)),
+                            ],
+                            PrintOnExit::Output => vec![
+                                (KeyModifiers::empty(), KeyCode::Char('y'), "Print output and quit", Action::Quit(QuitAction::PrintOutput)),
+                                (KeyModifiers::empty(), KeyCode::Char('n'), "Quit without printing", Action::Quit(QuitAction::Cancel)),
+                            ],
+                        };
+                        self.popup = Some(KeysPopup::new(keys));
+                        None
                     }
                     KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         Some(Action::NewStageAbove)
@@ -228,8 +271,25 @@ impl App {
 
     fn handle_action(&mut self, action: Action) {
         match action {
-            Action::Quit => {
-                self.should_quit = true;
+            Action::Quit(action) => {
+                self.should_quit = Some(match action {
+                    QuitAction::Succeed => QuitResult::Success,
+                    QuitAction::Cancel => QuitResult::Cancel,
+                    QuitAction::PrintPipeline => {
+                        let cmds = std::mem::take(&mut self.pipeline)
+                            .into_iter()
+                            .map(|mut stage| stage.input.value_and_reset())
+                            .collect();
+                        QuitResult::Pipeline(cmds)
+                    }
+                    QuitAction::PrintOutput => {
+                        if let Some(stage) = self.execution.pipeline.last_mut() {
+                            QuitResult::Output(stage.output.slice(..))
+                        } else {
+                            QuitResult::Cancel
+                        }
+                    }
+                });
             }
             Action::NewStageAbove => {
                 self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
@@ -686,7 +746,7 @@ enum StageEvent {
 async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     mut app: App,
-) -> io::Result<App> {
+) -> io::Result<QuitResult> {
     let mut term_event_reader = crossterm::event::EventStream::new();
 
     loop {
@@ -834,8 +894,8 @@ async fn run_app(
             UiEvent::EditorFinished(cmd) => app.handle_editor_exit(cmd, terminal)?,
         }
 
-        if app.should_quit {
-            break;
+        if let Some(result) = app.should_quit {
+            return Ok(result);
         }
 
         if !app.pending_execution.is_empty() && app.execution.finished() {
@@ -843,7 +903,7 @@ async fn run_app(
         }
     }
 
-    Ok(app)
+    Ok(QuitResult::Success)
 }
 
 #[tokio::main]
@@ -892,29 +952,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     terminal.show_cursor()?;
 
-    match res {
-        Ok(app) => {
-            match app.options.print_on_exit {
-                PrintOnExit::Pipeline => {
-                    for (i, stage) in app.pipeline.iter().enumerate() {
-                        if i != 0 {
-                            print!(" | ");
-                        }
-                        print!("{}", stage.input.value());
-                    }
-                    println!();
+    match res? {
+        QuitResult::Pipeline(pipeline) => {
+            for (i, stage) in pipeline.iter().enumerate() {
+                if i != 0 {
+                    print!(" | ");
                 }
-                PrintOnExit::Output => {
-                    if let Some(stage) = app.execution.pipeline.last() {
-                        std::io::stdout().write_all(stage.output.as_bytes())?;
-                    }
-                }
-                PrintOnExit::Nothing => {}
+                print!("{stage}");
             }
+            println!();
         }
-        Err(err) => {
-            eprintln!("{err:?}");
+        QuitResult::Output(output) => {
+            std::io::stdout().write_all(output.as_bytes())?;
         }
+        QuitResult::Cancel => return Err("cancelled".into()),
+        QuitResult::Success => (),
     }
 
     Ok(())
