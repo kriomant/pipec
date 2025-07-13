@@ -102,7 +102,7 @@ impl App {
         let focused_stage = pipeline.len() - 1;
         let shown_stage = focused_stage;
 
-        Ok(App {
+        let mut app = App {
             id_gen,
             options,
             should_quit: None,
@@ -118,7 +118,16 @@ impl App {
             invalid_line: String::new(),
             lines_cache: Vec::new(),
             spans_caches: Vec::new(),
-        })
+        };
+
+        if app.options.execute_on_start {
+            app.focused_stage = app.pipeline.len()-1;
+            app.shown_stage_index = app.focused_stage;
+            app.create_pending_execution();
+            app.execute_pending();
+        }
+
+        Ok(app)
     }
 
     fn render(&mut self, f: &mut Frame) {
@@ -803,6 +812,11 @@ async fn run_app(
             terminal.draw(|f| app.render(f))?;
         }
 
+
+        if !app.pending_execution.is_empty() && app.execution.finished() {
+            app.execute_pending();
+        }
+
         let event = {
             let mut exit_futures = FuturesUnordered::new();
             let mut stdin_futures = FuturesUnordered::new();
@@ -943,10 +957,6 @@ async fn run_app(
 
         if let Some(result) = app.should_quit {
             return Ok(result);
-        }
-
-        if !app.pending_execution.is_empty() && app.execution.finished() {
-            app.execute_pending();
         }
     }
 

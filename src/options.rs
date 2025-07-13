@@ -19,6 +19,10 @@ pub struct Options {
     #[arg(long)]
     pub parse_commands: bool,
 
+    /// Execute pipeline on start.
+    #[arg(long)]
+    pub execute_on_start: bool,
+
     /// What to print on program exit.
     #[arg(long, default_value="ask")]
     pub print_on_exit: PrintOnExit,
