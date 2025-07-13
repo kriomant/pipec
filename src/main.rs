@@ -32,7 +32,7 @@ mod id_generator;
 mod pipeline;
 mod ui;
 
-use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}};
+use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::Action, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
 use crate::id_generator::IdGenerator;
 
 struct App {
@@ -170,75 +170,126 @@ impl App {
     }
 
     fn handle_input(&mut self, event: Event) {
+        let action = self.get_action_for_event(event);
+        if let Some(action) = action {
+            self.handle_action(action);
+        }
+    }
+
+    fn get_action_for_event(&mut self, event: Event) -> Option<Action> {
         #[allow(clippy::single_match)]
         match event {
             Event::Key(key) => {
                 match key {
                     KeyEvent { code: KeyCode::Char('q'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.should_quit = true;
+                        Some(Action::Quit)
                     }
                     KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
+                        Some(Action::NewStageAbove)
                     }
                     KeyEvent { code: KeyCode::Char('n'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.focused_stage += 1;
-                        self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
+                        Some(Action::NewStageBelow)
                     }
                     KeyEvent { code: KeyCode::Char('d'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        if self.pipeline.len() > 1 {
-                            self.pipeline.remove(self.focused_stage);
-                            if self.focused_stage != 0 {
-                                self.focused_stage -= 1;
-                            }
-
-                            if self.shown_stage_index >= self.pipeline.len() {
-                                self.shown_stage_index = self.pipeline.len() - 1;
-                            }
-                        }
+                        Some(Action::DeleteStage)
                     }
                     KeyEvent { code: KeyCode::Char('x'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        let enabled = &mut self.pipeline[self.focused_stage].enabled;
-                        *enabled = !*enabled;
+                        Some(Action::ToggleStage)
                     }
                     KeyEvent { code: KeyCode::Char('c'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL|KeyModifiers::SHIFT, ..} => {
-                        log::info!("hard-terminate executions");
-                        {
-                            let this = &mut *self;
-                            this.execution.interrupt();
-                        };
+                        Some(Action::AbortPipeline)
                     }
                     KeyEvent { code: KeyCode::Up, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        // Move focus to previous stage.
-                        if self.focused_stage != 0 {
-                            self.focused_stage -= 1;
-                        }
+                        Some(Action::FocusPreviousStage)
                     }
                     KeyEvent { code: KeyCode::Down, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        // Move focus to next stage.
-                        if self.focused_stage < self.pipeline.len() - 1 {
-                            self.focused_stage += 1;
-                        }
+                        Some(Action::FocusNextStage)
                     }
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
-                        self.create_pending_execution();
-                        self.shown_stage_index = self.focused_stage;
+                        Some(Action::Execute)
                     }
                     KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        self.shown_stage_index = self.focused_stage;
+                        Some(Action::ShowStageOutput)
                     }
                     KeyEvent { code: KeyCode::Char('l'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        let _ = self.launch_pager();
+                        Some(Action::LaunchPager)
                     }
                     KeyEvent { code: KeyCode::Char('v'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
-                        let command = self.pipeline[self.focused_stage].input.value().to_string();
-                        let _ = self.launch_editor(command);
+                        Some(Action::LaunchEditor)
                     }
-                    _ => {
-                        self.pipeline[self.focused_stage].input.handle_event(&event);
+                    key => {
+                        Some(Action::Input(key))
                     }
                 }
             }
-            _ => {}
+            _ => None
+        }
+    }
+
+    fn handle_action(&mut self, action: Action) {
+        match action {
+            Action::Quit => {
+                self.should_quit = true;
+            }
+            Action::NewStageAbove => {
+                self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
+            }
+            Action::NewStageBelow => {
+                self.focused_stage += 1;
+                self.pipeline.insert(self.focused_stage, Stage::new(self.id_gen.gen_id()));
+            }
+            Action::DeleteStage => {
+                if self.pipeline.len() > 1 {
+                    self.pipeline.remove(self.focused_stage);
+                    if self.focused_stage != 0 {
+                        self.focused_stage -= 1;
+                    }
+
+                    if self.shown_stage_index >= self.pipeline.len() {
+                        self.shown_stage_index = self.pipeline.len() - 1;
+                    }
+                }
+            }
+            Action::ToggleStage => {
+                let enabled = &mut self.pipeline[self.focused_stage].enabled;
+                *enabled = !*enabled;
+            }
+            Action::AbortPipeline => {
+                log::info!("hard-terminate executions");
+                {
+                    let this = &mut *self;
+                    this.execution.interrupt();
+                };
+            }
+            Action::FocusPreviousStage => {
+                // Move focus to previous stage.
+                if self.focused_stage != 0 {
+                    self.focused_stage -= 1;
+                }
+            }
+            Action::FocusNextStage => {
+                // Move focus to next stage.
+                if self.focused_stage < self.pipeline.len() - 1 {
+                    self.focused_stage += 1;
+                }
+            }
+            Action::Execute => {
+                self.create_pending_execution();
+                self.shown_stage_index = self.focused_stage;
+            }
+            Action::ShowStageOutput => {
+                self.shown_stage_index = self.focused_stage;
+            }
+            Action::LaunchPager => {
+                let _ = self.launch_pager();
+            }
+            Action::LaunchEditor => {
+                let command = self.pipeline[self.focused_stage].input.value().to_string();
+                let _ = self.launch_editor(command);
+            }
+            Action::Input(key) => {
+                self.pipeline[self.focused_stage].input.handle_event(&Event::Key(key));
+            }
         }
     }
 
