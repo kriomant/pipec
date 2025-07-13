@@ -19,7 +19,7 @@ use ratatui::{
 };
 use recycle_vec::VecExt;
 use std::{
-    fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt as _, process::{ExitStatus, Stdio}
+    borrow::Cow, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt as _, process::{ExitStatus, Stdio}
 };
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _}, process::Command, select,
@@ -32,7 +32,7 @@ mod id_generator;
 mod pipeline;
 mod ui;
 
-use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
+use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, CopySource, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
 use crate::id_generator::IdGenerator;
 
 enum QuitResult {
@@ -76,6 +76,8 @@ struct App {
 
     /// External pager process.
     external_process: Option<ExternalProcess>,
+
+    clipboard: arboard::Clipboard,
 }
 
 impl App {
@@ -111,6 +113,7 @@ impl App {
             pending_execution: Vec::new(),
             popup: None,
             external_process: None,
+            clipboard: arboard::Clipboard::new()?,
 
             invalid_line: String::new(),
             lines_cache: Vec::new(),
@@ -200,7 +203,12 @@ impl App {
                 self.popup = None;
                 return None;
             }
-            return popup.get_action(event);
+
+            let action = popup.get_action(event);
+            if action.is_some() {
+                self.popup = None;
+            }
+            return action;
         }
 
         #[allow(clippy::single_match)]
@@ -225,6 +233,15 @@ impl App {
                             ],
                         };
                         self.popup = Some(KeysPopup::new(keys));
+                        None
+                    }
+                    KeyEvent { code: KeyCode::Char('y'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        self.popup = Some(KeysPopup::new(vec![
+                            (KeyModifiers::empty(), KeyCode::Char('c'), "Focused stage command", Action::CopyToClipboard(ui::action::CopySource::FocusedStageCommand)),
+                            (KeyModifiers::empty(), KeyCode::Char('p'), "Whole pipeline command", Action::CopyToClipboard(ui::action::CopySource::WholePipeline)),
+                            (KeyModifiers::empty(), KeyCode::Char('s'), "Shown stage output", Action::CopyToClipboard(ui::action::CopySource::ShownStageOutput)),
+                            (KeyModifiers::empty(), KeyCode::Char('o'), "Final output", Action::CopyToClipboard(ui::action::CopySource::FinalStageOuput)),
+                        ]));
                         None
                     }
                     KeyEvent { code: KeyCode::Char('p'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
@@ -349,6 +366,36 @@ impl App {
             }
             Action::Input(key) => {
                 self.pipeline[self.focused_stage].input.handle_event(&Event::Key(key));
+            }
+            Action::CopyToClipboard(source) => {
+                let text: Option<Cow<str>> = match source {
+                    CopySource::FocusedStageCommand => Some(self.pipeline[self.focused_stage].input.value().into()),
+                    CopySource::WholePipeline => {
+                        Some(self.pipeline.iter().map(|stage| stage.input.value()).join(" | ").into())
+                    }
+                    CopySource::ShownStageOutput => {
+                        let shown_stage_id = self.pipeline[self.shown_stage_index].id;
+                        if let Some(stage) = self.execution.get_stage(shown_stage_id) &&
+                            let Ok(output) = stage.output.slice_str(..)
+                        {
+                            Some(output.into())
+                        } else {
+                            None
+                        }
+                    }
+                    CopySource::FinalStageOuput => {
+                        if let Some(stage) = self.execution.pipeline.last() &&
+                            let Ok(output) = stage.output.slice_str(..)
+                        {
+                            Some(output.into())
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(text) = text {
+                    self.clipboard.set_text(text).unwrap();
+                }
             }
         }
     }

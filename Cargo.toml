@@ -22,6 +22,7 @@ itertools = "0.14.0"
 bstr = "1.12.0"
 recycle_vec = "1.1.2"
 async-tempfile = "0.7.0"
+arboard = "3.6.0"
 
 [build-dependencies]
 peginator_codegen = "0.7.0"

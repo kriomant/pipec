@@ -9,8 +9,17 @@ pub(crate) enum QuitAction {
 }
 
 #[derive(Clone)]
+pub(crate) enum CopySource {
+    FocusedStageCommand,
+    WholePipeline,
+    ShownStageOutput,
+    FinalStageOuput,
+}
+
+#[derive(Clone)]
 pub(crate) enum Action {
     Quit(QuitAction),
+    CopyToClipboard(CopySource),
     Execute,
     FocusPreviousStage,
     FocusNextStage,
