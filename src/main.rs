@@ -1,6 +1,6 @@
 #![feature(result_option_map_or_default, box_patterns, import_trait_associated_functions, exit_status_error)]
 
-use append_only_bytes::{AppendOnlyBytes, BytesSlice};
+use append_only_bytes::BytesSlice;
 use clap::Parser;
 use crossterm::{
     event::{DisableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
@@ -19,10 +19,10 @@ use ratatui::{
 };
 use recycle_vec::VecExt;
 use std::{
-    borrow::Cow, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt as _, process::{ExitStatus, Stdio}
+    borrow::Cow, fs::File, io::{self, ErrorKind, Write}, os::unix::process::ExitStatusExt as _, process::ExitStatus
 };
 use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _}, process::Command, select,
+    io::{AsyncReadExt as _, AsyncWriteExt as _}, select,
 };
 use tui_input::{backend::crossterm::EventHandler, Input};
 
@@ -32,7 +32,7 @@ mod id_generator;
 mod pipeline;
 mod ui;
 
-use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, CopySource, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
+use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, PendingStage, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, CopySource, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
 use crate::id_generator::IdGenerator;
 
 enum QuitResult {
@@ -57,7 +57,7 @@ struct App {
 
     // Pending execution.
     // List of commands to execute when current execution is finished.
-    pending_execution: Vec<PendingExecution>,
+    pending_execution: Option<PendingExecution>,
 
     // Index of focused pipe in `pipeline`.
     // This is command currently edited by user.
@@ -110,7 +110,7 @@ impl App {
             focused_stage,
             shown_stage_index: shown_stage,
             execution: Execution::new(),
-            pending_execution: Vec::new(),
+            pending_execution: None,
             popup: None,
             external_process: None,
             clipboard: arboard::Clipboard::new()?,
@@ -410,12 +410,12 @@ impl App {
     }
 
     fn create_pending_execution(&mut self) {
-        self.pending_execution.clear();
+        let mut pending_execution = PendingExecution { pipeline: Vec::new() };
 
         // Create
         for stage in &self.pipeline {
             if stage.enabled {
-                self.pending_execution.push(PendingExecution {
+                pending_execution.pipeline.push(PendingStage {
                     stage_ids: vec![stage.id],
                     command: stage.input.value().to_string()
                 });
@@ -423,12 +423,13 @@ impl App {
                 // Disabled commands are attached to preceeding enabled
                 // command and show it's output.
                 // Leading disabled commands are completely ignored.
-                if let Some(pending_stage) = self.pending_execution.last_mut() {
+                if let Some(pending_stage) = pending_execution.pipeline.last_mut() {
                     pending_stage.stage_ids.push(stage.id);
                 }
             }
         }
 
+        self.pending_execution = Some(pending_execution);
         self.execution.interrupt();
     }
 
@@ -436,36 +437,9 @@ impl App {
     fn execute_pending(&mut self) {
         assert!(self.execution.finished());
 
-        let pending_commands = std::mem::take(&mut self.pending_execution);
-        self.execution.index.clear();
-
-        // Try to reuse parts of last execution.
-        // Execution stage may be reused if it's command matches one in pending execution,
-        // it is still running or successfully finished.
-        // Since execution stage is (intentionally) not directly tied to visible stage,
-        // but only though index, it may be reused event for another visible stage.
-        let number_of_steps_to_reuse = pending_commands.iter().zip(self.execution.pipeline.iter())
-            .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
-            .count();
-        self.execution.pipeline.truncate(number_of_steps_to_reuse);
-        for (i, exec) in pending_commands.iter().enumerate().take(number_of_steps_to_reuse) {
-            for &stage_id in &exec.stage_ids {
-                self.execution.index.insert(stage_id, i);
-            }
-        }
-
-        // Now add new (non-reused) stages.
-        for (i, exec) in pending_commands.into_iter().enumerate().skip(number_of_steps_to_reuse) {
-            self.execution.pipeline.push(self.start_command(exec.command, i != 0).unwrap());
-            for &stage_id in &exec.stage_ids {
-                self.execution.index.insert(stage_id, self.execution.pipeline.len()-1);
-            }
-        }
-
-        // Validate indices in `index`, they all must point to valid execution pipeline stage.
-        assert!(self.execution.index.values().all(|&v| v < self.execution.pipeline.len()),
-            "pipeline len: {}, index: {:?}, reused: {}",
-            self.execution.pipeline.len(), self.execution.index, number_of_steps_to_reuse);
+        let Some(pending_execution) = self.pending_execution.take() else { return };
+        let execution = std::mem::take(&mut self.execution);
+        self.execution = pending_execution.execute(&self.options.resolve_shell(), execution);
     }
 
     fn handle_process_terminated(&mut self, i: usize, exit_status: ExitStatus) -> std::io::Result<()> {
@@ -609,37 +583,6 @@ impl App {
         }
 
         Ok(())
-    }
-
-    fn start_command(&self, command: String, stdin: bool) -> std::io::Result<StageExecution> {
-        let mut cmd = Command::new(self.options.resolve_shell());
-        if cfg!(target_os = "windows") {
-            cmd.args(["/C", &command]);
-        } else {
-            cmd.args(["-c", &command]);
-        };
-
-        log::info!("start command: {cmd:?}");
-        let mut child = cmd
-            .kill_on_drop(true)
-            .stdin(if stdin { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdin = child.stdin.take();
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-        assert!(stdout.is_some() && stderr.is_some());
-
-        Ok(StageExecution {
-            command,
-            status: ProcessStatus::Running(child),
-            stdin,
-            stdout,
-            stderr,
-            bytes_written_to_stdin: 0,
-            output: AppendOnlyBytes::new(),
-        })
     }
 
     fn launch_pager(&mut self) -> std::io::Result<()> {
@@ -813,7 +756,7 @@ async fn run_app(
         }
 
 
-        if !app.pending_execution.is_empty() && app.execution.finished() {
+        if app.pending_execution.is_some() && app.execution.finished() {
             app.execute_pending();
         }
 
