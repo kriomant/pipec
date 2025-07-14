@@ -31,6 +31,10 @@ pub fn render_help(f: &mut Frame, area: Rect) {
             Span::raw("Show output of current stage"),
         ]),
         Line::from(vec![
+            Span::styled("Ctrl+R       ", key_style),
+            Span::raw("Restart whole pipeline"),
+        ]),
+        Line::from(vec![
             Span::styled("Ctrl+Q       ", key_style),
             Span::raw("Exit program"),
         ]),

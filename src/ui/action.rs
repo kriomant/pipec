@@ -32,4 +32,5 @@ pub(crate) enum Action {
     LaunchPager,
     LaunchEditor,
     Input(KeyEvent),
+    RestartPipeline,
 }

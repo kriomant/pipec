@@ -55,9 +55,12 @@ struct App {
     // Current execution.
     execution: Execution,
 
-    // Pending execution.
-    // List of commands to execute when current execution is finished.
+    /// Pending execution.
+    /// List of commands to execute when current execution is finished.
     pending_execution: Option<PendingExecution>,
+
+    /// Whether current execution may be reused for next one.
+    can_reuse_execution: bool,
 
     // Index of focused pipe in `pipeline`.
     // This is command currently edited by user.
@@ -111,6 +114,7 @@ impl App {
             shown_stage_index: shown_stage,
             execution: Execution::new(),
             pending_execution: None,
+            can_reuse_execution: true,
             popup: None,
             external_process: None,
             clipboard: arboard::Clipboard::new()?,
@@ -286,6 +290,9 @@ impl App {
                     KeyEvent { code: KeyCode::Char('v'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         Some(Action::LaunchEditor)
                     }
+                    KeyEvent { code: KeyCode::Char('r'), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
+                        Some(Action::RestartPipeline)
+                    }
                     key => {
                         Some(Action::Input(key))
                     }
@@ -406,6 +413,10 @@ impl App {
                     self.clipboard.set_text(text).unwrap();
                 }
             }
+            Action::RestartPipeline => {
+                self.can_reuse_execution = false;
+                self.create_pending_execution();
+            }
         }
     }
 
@@ -435,11 +446,15 @@ impl App {
 
     /// Start pending execution if current one is finished.
     fn execute_pending(&mut self) {
+        let Some(pending_execution) = self.pending_execution.take() else { return };
         assert!(self.execution.finished());
 
-        let Some(pending_execution) = self.pending_execution.take() else { return };
-        let execution = std::mem::take(&mut self.execution);
-        self.execution = pending_execution.execute(&self.options.resolve_shell(), execution);
+        let mut last_execution = std::mem::take(&mut self.execution);
+        if !self.can_reuse_execution {
+            self.can_reuse_execution = true;
+            last_execution = Execution::new();
+        }
+        self.execution = pending_execution.execute(&self.options.resolve_shell(), last_execution);
     }
 
     fn handle_process_terminated(&mut self, i: usize, exit_status: ExitStatus) -> std::io::Result<()> {
