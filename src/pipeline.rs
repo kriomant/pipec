@@ -63,6 +63,7 @@ pub(crate) struct StageExecution {
     /// Number of bytes written to stdin from previous stage's output.
     pub(crate) bytes_written_to_stdin: usize,
     pub(crate) output: AppendOnlyBytes,
+    pub(crate) eoutput: AppendOnlyBytes,
 }
 impl StageExecution {
     pub fn may_reuse_for(&self, command: &str) -> bool {
@@ -192,5 +193,6 @@ pub(crate) fn start_command(shell: &OsStr, command: String, stdin: bool) -> std:
         stderr,
         bytes_written_to_stdin: 0,
         output: AppendOnlyBytes::new(),
+        eoutput: AppendOnlyBytes::new(),
     })
 }

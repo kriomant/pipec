@@ -71,9 +71,8 @@ struct App {
     shown_stage_index: usize,
 
     // Caches which hold vector capacity for reuse.
-    invalid_line: String,
-    lines_cache: Vec<Line<'static>>,
-    spans_caches: Vec<Vec<Span<'static>>>,
+    output_cache: OutputRenderCache,
+    eoutput_cache: OutputRenderCache,
 
     popup: Option<KeysPopup>,
 
@@ -81,6 +80,13 @@ struct App {
     external_process: Option<ExternalProcess>,
 
     clipboard: arboard::Clipboard,
+}
+
+#[derive(Default)]
+struct OutputRenderCache {
+    invalid_line: String,
+    lines_cache: Vec<Line<'static>>,
+    spans_caches: Vec<Vec<Span<'static>>>,
 }
 
 impl App {
@@ -119,9 +125,8 @@ impl App {
             external_process: None,
             clipboard: arboard::Clipboard::new()?,
 
-            invalid_line: String::new(),
-            lines_cache: Vec::new(),
-            spans_caches: Vec::new(),
+            output_cache: Default::default(),
+            eoutput_cache: Default::default(),
         };
 
         if app.options.execute_on_start {
@@ -142,12 +147,27 @@ impl App {
         let mut constraints: Vec<_> = std::iter::repeat_n(Constraint::Length(1), self.pipeline.len())
             .collect();
 
-        // Output pane takes the rest.
+        // Decide how to use remaining space.
+        let mut show_output = false;
+        let mut show_eoutput = false;
         let shown_stage = &self.pipeline[self.shown_stage_index];
-        let show_output = self.execution.index.contains_key(&shown_stage.id);
+        if let Some(exec_stage) = self.execution.get_stage(shown_stage.id) {
+            // Definitely show stderr if there is anything to show.
+            show_eoutput = !exec_stage.eoutput.is_empty();
+            // Show stdout if there is anything to show or if stderr is empty.
+            show_output = !exec_stage.output.is_empty() || !show_eoutput;
+            assert!(show_output || show_eoutput);
+        }
+
+        if show_eoutput {
+            constraints.insert(self.shown_stage_index+1, Constraint::Fill(1));
+        }
         if show_output {
-            constraints.insert(self.shown_stage_index+1, Constraint::Min(0));
-        } else {
+            constraints.insert(self.shown_stage_index+1, Constraint::Fill(1));
+        }
+        // If there is nothing to show, show help.
+        let show_help = !show_output && !show_eoutput;
+        if show_help {
             // Show help when there is no output to show.
             constraints.insert(0, Constraint::Fill(1));
         }
@@ -158,9 +178,11 @@ impl App {
             .split(f.area())
             .to_vec();
 
-        if !show_output && self.popup.is_none() {
+        if show_help {
             let help_area = areas.remove(0);
-            ui::utils::render_help(f, help_area);
+            if self.popup.is_none() {
+                ui::utils::render_help(f, help_area);
+            }
         }
 
         // Output area
@@ -168,19 +190,16 @@ impl App {
             let output_area = areas.remove(self.shown_stage_index+1);
             if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
                 let buf = self.execution.pipeline[shown_stage_exec_index].output.as_bytes();
+                render_bytes(f, buf, output_area, Style::default(), &mut self.output_cache);
+            }
+        }
 
-                // Create text, reusing vector allocations.
-                let mut lines = std::mem::take(&mut self.lines_cache).recycle();
-                lines.extend(self.spans_caches.drain(..).map(|v| Line { spans: v.recycle(), ..Default::default() }));
-
-                let mut text = Text::from(lines);
-                crate::ui::binary::render_binary(buf, output_area.as_size(), &mut text, &mut self.invalid_line);
-
-                f.render_widget(&text, output_area);
-
-                // Save vector allocations for reuse.
-                self.spans_caches.extend(text.lines.iter_mut().map(|line| std::mem::take(&mut line.spans).recycle()));
-                self.lines_cache = text.lines.recycle();
+        // Stderr output area
+        if show_eoutput {
+            let output_area = areas.remove(self.shown_stage_index+1);
+            if let Some(shown_stage_exec_index) = self.execution.index.get(&shown_stage.id).cloned() {
+                let buf = self.execution.pipeline[shown_stage_exec_index].eoutput.as_bytes();
+                render_bytes(f, buf, output_area, Style::default().fg(Color::Red), &mut self.eoutput_cache);
             }
         }
 
@@ -526,21 +545,12 @@ impl App {
         let stage = &mut self.execution.pipeline[i];
 
         if !buf.is_empty() {
-            stage.output.push_slice(buf);
+            stage.eoutput.push_slice(buf);
             return;
         }
 
         // Stderr is closed.
         stage.stderr = None;
-
-        // Close stdin of next stage, if all data are already written.
-        let output_len = stage.output.len();
-        if i < self.pipeline.len() - 1 {
-            let next_stage = &mut self.execution.pipeline[i+1];
-            if next_stage.bytes_written_to_stdin == output_len {
-                next_stage.stdin = None;
-            }
-        }
     }
 
     fn handle_pager_stdin(&mut self, bytes_written: usize) {
@@ -997,4 +1007,19 @@ struct Pager {
 enum ExternalProcess {
     Pager(Pager),
     Editor(BoxFuture<'static, Option<String>>),
+}
+
+fn render_bytes(f: &mut Frame, buf: &[u8], area: Rect, style: Style, cache: &mut OutputRenderCache) {
+    // Create text, reusing vector allocations.
+    let mut lines = std::mem::take(&mut cache.lines_cache).recycle();
+    lines.extend(cache.spans_caches.drain(..).map(|v| Line { spans: v.recycle(), ..Default::default() }));
+
+    let mut text = Text::from(lines).style(style);
+    crate::ui::binary::render_binary(buf, area.as_size(), &mut text, &mut cache.invalid_line);
+
+    f.render_widget(&text, area);
+
+    // Save vector allocations for reuse.
+    cache.spans_caches.extend(text.lines.iter_mut().map(|line| std::mem::take(&mut line.spans).recycle()));
+    cache.lines_cache = text.lines.recycle();
 }
