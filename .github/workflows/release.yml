@@ -19,6 +19,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   upload-assets:
+    needs: create-release
     strategy:
       matrix:
         include:
@@ -35,3 +36,17 @@ jobs:
           bin: pipec
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  update-homebrew-tap:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Homebrew/actions/bump-packages@v1.27.0
+        with:
+          # Custom GitHub access token with only the 'public_repo' scope enabled
+          token: ${{secrets.BREW_TOKEN}}
+          # Bump only these formulae if outdated
+          formulae: >
+            pipec
+          # Do not use a fork for opening PR's
+          fork: false
