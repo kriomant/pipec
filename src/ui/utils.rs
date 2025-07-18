@@ -24,7 +24,11 @@ pub fn render_help(f: &mut Frame, area: Rect) {
     let keys_help = Text::from(vec![
         Line::from(vec![
             Span::styled("Enter        ", key_style),
-            Span::raw("Execute command"),
+            Span::raw("Execute commands till focused"),
+        ]),
+        Line::from(vec![
+            Span::styled("Alt+Enter    ", key_style),
+            Span::raw("Execute all commands"),
         ]),
         Line::from(vec![
             Span::styled("Ctrl+Space   ", key_style),

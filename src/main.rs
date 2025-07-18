@@ -42,6 +42,11 @@ enum QuitResult {
     Output(BytesSlice),
 }
 
+enum ExecutionMode {
+    All,
+    TillFocused,
+}
+
 struct App {
     options: Options,
 
@@ -132,7 +137,7 @@ impl App {
         if app.options.execute_on_start {
             app.focused_stage = app.pipeline.len()-1;
             app.shown_stage_index = app.focused_stage;
-            app.create_pending_execution();
+            app.create_pending_execution(ExecutionMode::All);
             app.execute_pending();
         }
 
@@ -300,6 +305,9 @@ impl App {
                     KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::NONE, ..} => {
                         Some(Action::Execute)
                     }
+                    KeyEvent { code: KeyCode::Enter, kind: KeyEventKind::Press, modifiers: KeyModifiers::ALT, ..} => {
+                        Some(Action::ExecuteAll)
+                    }
                     KeyEvent { code: KeyCode::Char(' '), kind: KeyEventKind::Press, modifiers: KeyModifiers::CONTROL, ..} => {
                         Some(Action::ShowStageOutput)
                     }
@@ -386,7 +394,11 @@ impl App {
                 }
             }
             Action::Execute => {
-                self.create_pending_execution();
+                self.create_pending_execution(ExecutionMode::TillFocused);
+                self.shown_stage_index = self.focused_stage;
+            }
+            Action::ExecuteAll => {
+                self.create_pending_execution(ExecutionMode::All);
                 self.shown_stage_index = self.focused_stage;
             }
             Action::ShowStageOutput => {
@@ -434,28 +446,40 @@ impl App {
             }
             Action::RestartPipeline => {
                 self.can_reuse_execution = false;
-                self.create_pending_execution();
+                self.create_pending_execution(ExecutionMode::All);
             }
         }
     }
 
-    fn create_pending_execution(&mut self) {
+    fn create_pending_execution(&mut self, mode: ExecutionMode) {
+        // Disabled commands are attached to preceeding enabled
+        // command and show it's output.
+        // Leading disabled commands are completely ignored.
+
         let mut pending_execution = PendingExecution { pipeline: Vec::new() };
 
-        // Create
-        for stage in &self.pipeline {
+        // Determine range of commands to execute.
+        let end_idx = match mode {
+            ExecutionMode::All => self.pipeline.len(),
+            ExecutionMode::TillFocused => {
+                let mut idx = self.focused_stage + 1;
+                // Attach following disabled stages, since we get output
+                // for them "for free".
+                while let Some(stage) = self.pipeline.get(idx) && !stage.enabled {
+                    idx += 1;
+                }
+                idx
+            }
+        };
+
+        for stage in &self.pipeline[..end_idx] {
             if stage.enabled {
                 pending_execution.pipeline.push(PendingStage {
                     stage_ids: vec![stage.id],
                     command: stage.input.value().to_string()
                 });
-            } else {
-                // Disabled commands are attached to preceeding enabled
-                // command and show it's output.
-                // Leading disabled commands are completely ignored.
-                if let Some(pending_stage) = pending_execution.pipeline.last_mut() {
-                    pending_stage.stage_ids.push(stage.id);
-                }
+            } else if let Some(pending_stage) = pending_execution.pipeline.last_mut() {
+                pending_stage.stage_ids.push(stage.id);
             }
         }
 
@@ -525,7 +549,7 @@ impl App {
 
         // Close stdin of next stage, if all data are already written.
         let output_len = stage.output.len();
-        if i < self.pipeline.len() - 1 {
+        if i < self.execution.pipeline.len() - 1 {
             let next_stage = &mut self.execution.pipeline[i+1];
             if next_stage.bytes_written_to_stdin == output_len {
                 next_stage.stdin = None;

@@ -21,6 +21,7 @@ pub(crate) enum Action {
     Quit(QuitAction),
     CopyToClipboard(CopySource),
     Execute,
+    ExecuteAll,
     FocusPreviousStage,
     FocusNextStage,
     ShowStageOutput,
