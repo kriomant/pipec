@@ -39,6 +39,15 @@ pub struct Options {
     #[arg(long)]
     pub editor: Option<OsString>,
 
+    #[arg(
+        long,
+        default_value_t=true,
+        default_missing_value="true",
+        require_equals=true,
+        num_args=0..=1,
+    )]
+    pub syntax_highlight: bool,
+
     #[arg(long, requires="log_file")]
     pub logging: Option<String>,
     #[arg(long)]

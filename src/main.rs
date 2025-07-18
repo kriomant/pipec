@@ -32,7 +32,7 @@ mod id_generator;
 mod pipeline;
 mod ui;
 
-use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, PendingStage, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, CopySource, QuitAction}, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
+use crate::{options::{Options, PrintOnExit}, pipeline::{Execution, PendingExecution, PendingStage, ProcessStatus, Stage, StageExecution}, ui::{action::{Action, CopySource, QuitAction}, highlight::highlight_command_to_spans, popup::KeysPopup, utils::{status_failed_span, status_killed_span, status_running_span, status_successful_span, status_unknown_span}}};
 use crate::id_generator::IdGenerator;
 
 enum QuitResult {
@@ -206,7 +206,7 @@ impl App {
         let stage_areas = areas;
         for (i, (stage, area)) in self.pipeline.iter().zip(stage_areas.iter()).enumerate() {
             let exec = self.execution.get_stage(stage.id);
-            let cursor_pos = render_stage(f, stage, exec, *area, i == self.focused_stage);
+            let cursor_pos = render_stage(f, stage, exec, *area, i == self.focused_stage, &self.options);
 
             if self.focused_stage == i {
                 f.set_cursor_position(cursor_pos);
@@ -694,7 +694,10 @@ impl App {
 
 /// Renders stage into given area.
 /// Returns cursor position.
-fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>, area: Rect, focused: bool) -> Position {
+fn render_stage(
+    frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>, area: Rect,
+    focused: bool, options: &Options
+) -> Position {
     let [marker_area, command_area, status_area] = Layout
         ::horizontal([
             Constraint::Min(1),
@@ -718,9 +721,13 @@ fn render_stage(frame: &mut Frame, stage: &Stage, exec: Option<&StageExecution>,
         command_style = command_style.bold()
     }
     let scroll = stage.input.visual_scroll(command_area.width as usize - 1);
-    let command = Paragraph::new(Span::styled(stage.input.value(), command_style))
-        .scroll((0, scroll as u16));
-    frame.render_widget(command, command_area);
+    let command = if options.syntax_highlight {
+        let highlighted = Line::from(highlight_command_to_spans(stage.input.value(), command_style).unwrap());
+        Paragraph::new(highlighted)
+    } else {
+        Paragraph::new(Span::styled(stage.input.value(), command_style))
+    };
+    frame.render_widget(command.scroll((0, scroll as u16)), command_area);
 
     // Status indicator
     let status_span = match exec {

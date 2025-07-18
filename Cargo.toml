@@ -24,6 +24,10 @@ recycle_vec = "1.1.2"
 async-tempfile = "0.7.0"
 arboard = "3.6.0"
 
+# Syntax-highlighting
+tree-sitter-highlight = "0.25.8"
+tree-sitter-bash = "0.25.0"
+
 [build-dependencies]
 peginator_codegen = "0.7.0"
 
