@@ -29,7 +29,7 @@ fn get_style_for_highlight(highlight: usize, style: Style) -> Style {
     }
 }
 
-pub(crate) fn highlight_command_to_spans(command: &str, base_style: Style) -> Result<Vec<Span<'static>>, tree_sitter_highlight::Error> {
+pub(crate) fn highlight_command_to_spans<'c>(command: &'c str, base_style: Style) -> Result<Vec<Span<'c>>, tree_sitter_highlight::Error> {
     let language = tree_sitter_bash::LANGUAGE;
 
     let mut config = HighlightConfiguration::new(
@@ -50,7 +50,8 @@ pub(crate) fn highlight_command_to_spans(command: &str, base_style: Style) -> Re
     ).unwrap();
 
     let mut spans = Vec::new();
-    let mut buffer = String::new();
+    let mut span_start = 0;
+    let mut span_end = 0;
 
     let mut styles = Vec::with_capacity(3);
     styles.push(base_style);
@@ -58,26 +59,30 @@ pub(crate) fn highlight_command_to_spans(command: &str, base_style: Style) -> Re
     for event in highlights {
         match event? {
             HighlightEvent::Source { start, end } => {
-                buffer.push_str(&command[start..end]);
+                assert_eq!(span_end, start);
+                span_end = end;
             }
             HighlightEvent::HighlightStart(highlight) => {
                 let style = *styles.last().unwrap();
-                if !buffer.is_empty() {
-                    let text = std::mem::take(&mut buffer);
+                if span_start != span_end {
+                    let text = &command[span_start..span_end];
                     spans.push(Span::styled(text, style));
+                    span_start = span_end;
                 }
                 styles.push(get_style_for_highlight(highlight.0, style));
             }
             HighlightEvent::HighlightEnd => {
                 let style = styles.pop().unwrap();
-                let text = std::mem::take(&mut buffer);
+                let text = &command[span_start..span_end];
+                span_start = span_end;
                 spans.push(Span::styled(text, style));
             }
         }
     }
 
-    if !buffer.is_empty() {
-        spans.push(Span::from(buffer));
+    if span_start != span_end {
+        let text = &command[span_start..span_end];
+        spans.push(Span::styled(text, base_style));
     }
     assert!(styles.len() == 1);
 
