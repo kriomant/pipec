@@ -962,7 +962,7 @@ async fn run_app(
     Ok(QuitResult::Success)
 }
 
-#[tokio::main]
+#[tokio::main(flavor="current_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let options = Options::parse();
 

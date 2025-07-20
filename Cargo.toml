@@ -10,7 +10,7 @@ crossterm = { version = "0.29", features = [
     "use-dev-tty", # This feature is required on MacOS, see https://github.com/crossterm-rs/crossterm/pull/735
     "libc", # To work around bug https://github.com/crossterm-rs/crossterm/issues/935
 ] }
-tokio = { version = "1.0", features = ["full"] }
+tokio = { version = "1.0", features = ["rt", "macros", "io-util", "process"] }
 futures = "0.3.31"
 tui-input = "0.12.1"
 append-only-bytes = "0.1.12"
