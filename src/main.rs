@@ -44,7 +44,7 @@ enum QuitResult {
 
 enum ExecutionMode {
     All,
-    TillFocused,
+    TillShownOrFocused,
 }
 
 struct App {
@@ -114,7 +114,6 @@ impl App {
             pipeline.push(Stage::new(id_gen.gen_id()));
         }
         let focused_stage = pipeline.len() - 1;
-        let shown_stage = focused_stage;
 
         let mut app = App {
             id_gen,
@@ -122,7 +121,7 @@ impl App {
             should_quit: None,
             pipeline,
             focused_stage,
-            shown_stage_index: shown_stage,
+            shown_stage_index: 0,
             execution: Execution::default(),
             pending_execution: None,
             can_reuse_execution: true,
@@ -394,12 +393,10 @@ impl App {
                 }
             }
             Action::Execute => {
-                self.create_pending_execution(ExecutionMode::TillFocused);
-                self.shown_stage_index = self.focused_stage;
+                self.create_pending_execution(ExecutionMode::TillShownOrFocused);
             }
             Action::ExecuteAll => {
                 self.create_pending_execution(ExecutionMode::All);
-                self.shown_stage_index = self.focused_stage;
             }
             Action::ShowStageOutput => {
                 self.shown_stage_index = self.focused_stage;
@@ -460,9 +457,15 @@ impl App {
 
         // Determine range of commands to execute.
         let end_idx = match mode {
-            ExecutionMode::All => self.pipeline.len(),
-            ExecutionMode::TillFocused => {
-                let mut idx = self.focused_stage + 1;
+            ExecutionMode::All => {
+                self.shown_stage_index = self.pipeline.len() - 1;
+                self.pipeline.len()
+            }
+            ExecutionMode::TillShownOrFocused => {
+                if self.shown_stage_index < self.focused_stage {
+                    self.shown_stage_index = self.focused_stage;
+                }
+                let mut idx = self.shown_stage_index + 1;
                 // Attach following disabled stages, since we get output
                 // for them "for free".
                 while let Some(stage) = self.pipeline.get(idx) && !stage.enabled {
