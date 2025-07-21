@@ -41,7 +41,7 @@ jobs:
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      - uses: Homebrew/actions/bump-packages@v1.27.0
+      - uses: Homebrew/actions/bump-packages@main
         with:
           # Custom GitHub access token with only the 'public_repo' scope enabled
           token: ${{secrets.BREW_TOKEN}}
