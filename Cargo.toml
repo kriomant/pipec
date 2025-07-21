@@ -1,7 +1,7 @@
 [package]
 name = "pipec"
 description = "CLI utility for editing shell pipelines"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 repository = "https://github.com/kriomant/pipec"
 homepage = "https://github.com/kriomant/pipec"
