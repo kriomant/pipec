@@ -9,7 +9,6 @@ use tui_input::Input;
 
 use crate::id_generator::Id;
 
-#[derive(Default)]
 pub(crate) struct Execution {
     /// Mapping from stage ID to index of corresponding
     /// stage execution in `pipeline`.
@@ -18,15 +17,28 @@ pub(crate) struct Execution {
     /// Sequence of commands being executed.
     pub pipeline: Vec<StageExecution>,
 
-    interrupted: bool,
+    /// Index of first interrupted stage.
+    /// Pipeline stages are always interrupted starting from some index
+    /// and to the end.
+    interrupted_since: usize,
 }
 
-impl Execution {
-    pub fn new() -> Self {
+impl Default for Execution {
+    fn default() -> Self {
         Self {
             index: HashMap::new(),
             pipeline: Vec::new(),
-            interrupted: false,
+            interrupted_since: usize::MAX,
+        }
+    }
+}
+
+impl Execution {
+    pub fn new(pipeline: Vec<StageExecution>, index: HashMap<Id, usize>) -> Self {
+        Self {
+            index,
+            pipeline,
+            interrupted_since: usize::MAX,
         }
     }
 
@@ -34,16 +46,32 @@ impl Execution {
         self.index.get(&id).cloned().map(|index| &self.pipeline[index])
     }
 
-    pub fn finished(&self) -> bool {
-        self.pipeline.iter().all(|stage| stage.finished())
+    pub fn interrupted_stages_are_finished(&self) -> bool {
+        self.pipeline[self.interrupted_since..].iter().all(|stage| stage.finished())
     }
 
-    pub fn interrupt(&mut self) {
-        if self.interrupted { return }
+    pub fn interrupt(&mut self, from_index: usize) {
+        if from_index >= self.interrupted_since {
+            return;
+        }
 
-        for exec in &mut self.pipeline {
+        let non_interrupted_stages_len = self.pipeline.len().min(self.interrupted_since);
+        for exec in &mut self.pipeline[from_index..non_interrupted_stages_len] {
             exec.interrupt();
         }
+
+        self.interrupted_since = from_index;
+    }
+
+    /// Returns stages which can potentially be reused for another execution.
+    fn non_interrupted_stages(&self) -> &[StageExecution] {
+        let count = self.pipeline.len().min(self.interrupted_since);
+        &self.pipeline[..count]
+    }
+
+    pub fn reuse(mut self) -> Vec<StageExecution> {
+        let count = self.pipeline.len().min(self.interrupted_since);
+        self.pipeline.drain(..count).collect()
     }
 }
 
@@ -78,6 +106,7 @@ impl StageExecution {
     }
 
     fn interrupt(&mut self) {
+        self.stdin = None;
         if let ProcessStatus::Running(child) = &mut self.status {
             child.start_kill().unwrap();
         }
@@ -128,40 +157,52 @@ pub(crate) struct PendingExecution {
     pub pipeline: Vec<PendingStage>,
 }
 impl PendingExecution {
-    pub fn execute(self, shell: &OsStr, mut execution_to_reuse: Execution) -> Execution {
-        assert!(execution_to_reuse.finished());
+    /// Calculates how many stages of existing execution may be reused by
+    /// pending one.
+    pub fn calculate_number_of_stages_to_reuse(&self, execution: &Execution) -> usize {
+        // Try to reuse parts of last execution.
+        // Execution stage may be reused if it's command matches one in pending execution,
+        // it is still running or successfully finished.
+        // Since execution stage is (intentionally) not directly tied to visible stage,
+        // but only though index, it may be reused even for another visible stage.
+        self.pipeline.iter().zip(execution.non_interrupted_stages().iter())
+            .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
+            .count()
+    }
 
+    pub fn execute(self, shell: &OsStr, mut reusable_stages: Vec<StageExecution>) -> Execution {
         // Try to reuse parts of last execution.
         // Execution stage may be reused if it's command matches one in pending execution,
         // it is still running or successfully finished.
         // Since execution stage is (intentionally) not directly tied to visible stage,
         // but only though index, it may be reused event for another visible stage.
-        let number_of_steps_to_reuse = self.pipeline.iter().zip(execution_to_reuse.pipeline.iter())
+        let number_of_steps_to_reuse = self.pipeline.iter().zip(reusable_stages.iter())
             .take_while(|(pending, old)| old.may_reuse_for(&pending.command))
             .count();
-        execution_to_reuse.pipeline.truncate(number_of_steps_to_reuse);
+        reusable_stages.truncate(number_of_steps_to_reuse);
+        let mut stages = reusable_stages;
 
-        execution_to_reuse.index.clear();
+        let mut index = HashMap::new();
         for (i, exec) in self.pipeline.iter().enumerate().take(number_of_steps_to_reuse) {
             for &stage_id in &exec.stage_ids {
-                execution_to_reuse.index.insert(stage_id, i);
+                index.insert(stage_id, i);
             }
         }
 
         // Now add new (non-reused) stages.
         for (i, exec) in self.pipeline.into_iter().enumerate().skip(number_of_steps_to_reuse) {
-            execution_to_reuse.pipeline.push(start_command(shell, exec.command, i != 0).unwrap());
+            stages.push(start_command(shell, exec.command, i != 0).unwrap());
             for &stage_id in &exec.stage_ids {
-                execution_to_reuse.index.insert(stage_id, execution_to_reuse.pipeline.len()-1);
+                index.insert(stage_id, stages.len()-1);
             }
         }
 
         // Validate indices in `index`, they all must point to valid execution pipeline stage.
-        assert!(execution_to_reuse.index.values().all(|&v| v < execution_to_reuse.pipeline.len()),
+        assert!(index.values().all(|&v| v < stages.len()),
             "pipeline len: {}, index: {:?}, reused: {}",
-            execution_to_reuse.pipeline.len(), execution_to_reuse.index, number_of_steps_to_reuse);
+            stages.len(), index, number_of_steps_to_reuse);
 
-        execution_to_reuse
+        Execution::new(stages, index)
     }
 }
 

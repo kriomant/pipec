@@ -123,7 +123,7 @@ impl App {
             pipeline,
             focused_stage,
             shown_stage_index: shown_stage,
-            execution: Execution::new(),
+            execution: Execution::default(),
             pending_execution: None,
             can_reuse_execution: true,
             popup: None,
@@ -378,7 +378,7 @@ impl App {
                 log::info!("hard-terminate executions");
                 {
                     let this = &mut *self;
-                    this.execution.interrupt();
+                    this.execution.interrupt(0);
                 };
             }
             Action::FocusPreviousStage => {
@@ -483,21 +483,28 @@ impl App {
             }
         }
 
+        // Calculate how may stages may be reused and interrupt all others.
+        let stages_to_reuse = pending_execution.calculate_number_of_stages_to_reuse(&self.execution);
+        self.execution.interrupt(stages_to_reuse);
+
         self.pending_execution = Some(pending_execution);
-        self.execution.interrupt();
     }
 
     /// Start pending execution if current one is finished.
     fn execute_pending(&mut self) {
         let Some(pending_execution) = self.pending_execution.take() else { return };
-        assert!(self.execution.finished());
+        assert!(self.execution.interrupted_stages_are_finished());
 
-        let mut last_execution = std::mem::take(&mut self.execution);
-        if !self.can_reuse_execution {
+        let last_execution = std::mem::take(&mut self.execution);
+
+        let reusable_stages = if self.can_reuse_execution {
+            last_execution.reuse()
+        } else {
             self.can_reuse_execution = true;
-            last_execution = Execution::new();
-        }
-        self.execution = pending_execution.execute(&self.options.resolve_shell(), last_execution);
+            Vec::new()
+        };
+
+        self.execution = pending_execution.execute(&self.options.resolve_shell(), reusable_stages);
     }
 
     fn handle_process_terminated(&mut self, i: usize, exit_status: ExitStatus) -> std::io::Result<()> {
@@ -811,8 +818,7 @@ async fn run_app(
             terminal.draw(|f| app.render(f))?;
         }
 
-
-        if app.pending_execution.is_some() && app.execution.finished() {
+        if app.pending_execution.is_some() && app.execution.interrupted_stages_are_finished() {
             app.execute_pending();
         }
 
