@@ -34,6 +34,25 @@ Editing such pipelines directly in shell has some inconveniences:
 
 ## Guide
 
+### Installation
+
+#### From source
+
+```sh
+cargo install --locked pipec
+```
+
+#### MacOS
+
+```sh
+brew tap kriomant/tap
+brew install pipec
+```
+
+#### Linux
+
+Install binary from GitHub Releases
+
 ### Basics
 
 Just running `pipec` will open empty pipeline.
