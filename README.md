@@ -23,6 +23,15 @@ Editing such pipelines directly in shell has some inconveniences:
 
 ![Demo](https://vhs.charm.sh/vhs-5roNbHxTOm2RD2ZFeIdxrr.gif)
 
+## Features
+
+* Minimalistic user interface
+* Output of stages is cached and reused on next runs.
+  Don't wait for long API response or database query every time.
+* Preview output of any stage in pipeline.
+* Possible shell integration: press key to edit existing pipeline, get updated one on exit.
+* Command syntax highlighting
+
 ## Guide
 
 ### Basics
@@ -39,18 +48,9 @@ You can also copy various items to clipboard with **Ctrl-Y**.
 
 ### Focused and shown stages
 
-Stage you are editing is *focused* one. You may change focused stage with *↑*/*↓* keys.
+Stage you are editing is *focused* one. You may change focused stage with *↑*/*↓* keys. By default commands are executed up to focused one.
 
-However, it is often convenient to preview output of some earlier stage when composing current one. So there is concept of *shown* stage. You select stage to show using **Ctrl-Enter** key.
-
-### Pipeline Execution
-
-When you press **Enter**, whole pipeline is executed. However, several leading stages may not be restarted, but already running/finished stage may be reused.
-
-Stage may be reused if:
-* It is first one or stages above it are also reused;
-* Command wasn't changed since last execution;
-* It is still running or was finished successfully.
+However, it is often convenient to preview output of some earlier or later stage when composing current one. So there is concept of *shown* stage. You select stage to show using **Ctrl-Space** key.
 
 ### Starting with existing pipeline
 
