@@ -1,7 +1,14 @@
 [package]
 name = "pipec"
+description = "CLI utility for editing shell pipelines"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/kriomant/pipec"
+homepage = "https://github.com/kriomant/pipec"
+license = "MIT"
+
+[package.metadata.release]
+push-remote = "github"
 
 [dependencies]
 ratatui = "0.30.0-alpha.4"
